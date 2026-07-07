@@ -110,6 +110,19 @@ class Board {
         return bestMove;
     }
 
+    /*
+     * Minimax explore les coups possibles jusqu'a une certaine profondeur.
+     * - player represente le joueur dont c'est le tour dans ce niveau de recherche.
+     * - playerToHelp represente le joueur pour lequel on cherche le meilleur coup.
+     *
+     * La methode simule chaque coup sur une copie du plateau, puis appelle recursivement
+     * minimax pour le joueur adverse. Quand la profondeur arrive a 0, ou quand la partie
+     * est terminee, evaluate(playerToHelp) donne une note au plateau.
+     *
+     * Si c'est le tour de playerToHelp, on garde le score le plus grand, car ce joueur
+     * cherche a ameliorer sa position. Sinon, on garde le score le plus petit, car on
+     * suppose que l'adversaire joue aussi le meilleur coup possible contre lui.
+     */
     public int minimax(int depth, int player, int playerToHelp) {
         if (depth == 0 || isTerminal()) return evaluate(playerToHelp);
 
@@ -139,10 +152,26 @@ class Board {
         return bestScore;
     }
 
+    /*
+     * Version publique de minimax avec elagage alpha-beta.
+     * Elle lance alphaBeta avec les bornes les plus larges possibles.
+     */
     public int minimaxAlphaBeta(int depth, int player, int playerToHelp) {
         return alphaBeta(depth, player, playerToHelp, Integer.MIN_VALUE, Integer.MAX_VALUE);
     }
 
+    /*
+     * Alpha-beta fait le meme travail que minimax, mais evite d'explorer des branches
+     * qui ne peuvent plus changer le resultat final.
+     *
+     * alpha est le meilleur score deja trouve pour le joueur qui maximise.
+     * beta est le meilleur score deja trouve pour le joueur qui minimise.
+     *
+     * Dans ce code, getBestMove utilise alphaBeta pour noter chaque coup possible :
+     * le coup est applique sur une copie du plateau, puis alphaBeta estime la suite
+     * de la partie. Si beta <= alpha, la branche est arretee avec break, car elle
+     * ne peut pas produire un meilleur choix que ce qui a deja ete trouve.
+     */
     private int alphaBeta(int depth, int player, int playerToHelp, int alpha, int beta) {
         if (depth == 0 || isTerminal()) return evaluate(playerToHelp);
 
@@ -174,6 +203,21 @@ class Board {
         return bestScore;
     }
 
+    /*
+     * evaluate donne une note numerique au plateau pour le joueur donne.
+     * Cette note est utilisee par minimax et alphaBeta quand la recherche s'arrete.
+     *
+     * Une victoire donne un tres grand score positif pour l'equipe du joueur, et un
+     * tres grand score negatif si l'adversaire a gagne. Sinon, la position est estimee
+     * avec trois criteres :
+     * - material : avantage en nombre de pieces.
+     * - mobility : difference entre les coups possibles des defenseurs et des attaquants.
+     * - kingSafety : facilite pour le roi de se rapprocher d'une sortie.
+     *
+     * Le score est calcule du point de vue des defenseurs, puis inverse si le joueur
+     * demande est l'attaquant rouge. Ainsi, un score positif est toujours bon pour
+     * le joueur passe en parametre.
+     */
     public int evaluate(int player) {
         int winner = getWinner();
         if (winner != 0) {
