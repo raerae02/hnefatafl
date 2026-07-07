@@ -2,6 +2,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 class Board {
+    private static final int[][] DIRECTIONS = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
     private int kingRow, kingCol;
     private static final int DEFAULT_SEARCH_DEPTH = 2;
     private static final int WIN_SCORE = 100000;
@@ -23,64 +24,43 @@ class Board {
     // Deplace une piece et verifie les captures autour.
     public void applyMove(Move move) {
         int piece = grid[move.fromRow][move.fromCol];
-        grid[move.toRow][move.toCol] = grid[move.fromRow][move.fromCol];
+
+        movePiece(move, piece);
+        captureAround(move.toRow, move.toCol, piece);
+    }
+
+    private void movePiece(Move move, int piece) {
+        grid[move.toRow][move.toCol] = piece;
         grid[move.fromRow][move.fromCol] = EMPTY;
 
         if (piece == KING) {
             kingRow = move.toRow;
             kingCol = move.toCol;
         }
+    }
 
-        if (inBounds(move.toRow-1, move.toCol)) {
-            int victim = grid[move.toRow-1][move.toCol];
+    private void captureAround(int row, int col, int piece) {
+        for (int[] direction : DIRECTIONS) {
+            int victimRow = row + direction[0];
+            int victimCol = col + direction[1];
+            int otherSideRow = row + 2 * direction[0];
+            int otherSideCol = col + 2 * direction[1];
 
-            if (victim != EMPTY && !sameTeam(victim, piece) && victim != KING) {
-                boolean captured = false;
-                if (inBounds(move.toRow-2, move.toCol)) {
-                    int otherSide = grid[move.toRow-2][move.toCol];
-                    captured = sameTeam(otherSide, piece) || (otherSide == EMPTY && isHostileSquare(move.toRow-2, move.toCol));
-                }
-                if (captured) grid[move.toRow-1][move.toCol] = EMPTY;
+            if (!inBounds(victimRow, victimCol)) continue;
+
+            int victim = grid[victimRow][victimCol];
+            if (victim != EMPTY && !sameTeam(victim, piece) && victim != KING
+                    && shouldCapture(otherSideRow, otherSideCol, piece)) {
+                grid[victimRow][victimCol] = EMPTY;
             }
         }
-        if (inBounds(move.toRow+1, move.toCol)) {
-            int victim = grid[move.toRow+1][move.toCol];
+    }
 
-            if (victim != EMPTY && !sameTeam(victim, piece) && victim != KING) {
-                boolean captured = false;
-                if (inBounds(move.toRow+2, move.toCol)) {
-                    int otherSide = grid[move.toRow+2][move.toCol];
-                    captured = sameTeam(otherSide, piece) || (otherSide == EMPTY && isHostileSquare(move.toRow+2, move.toCol));
-                }
-                if (captured) grid[move.toRow+1][move.toCol] = EMPTY;
-            }
-        }
+    private boolean shouldCapture(int row, int col, int piece) {
+        if (!inBounds(row, col)) return false;
 
-        if (inBounds(move.toRow, move.toCol-1)) {
-            int victim = grid[move.toRow][move.toCol-1];
-
-            if (victim != EMPTY && !sameTeam(victim, piece) && victim != KING) {
-                boolean captured = false;
-                if (inBounds(move.toRow, move.toCol-2)) {
-                    int otherSide = grid[move.toRow][move.toCol-2];
-                    captured = sameTeam(otherSide, piece) || (otherSide == EMPTY && isHostileSquare(move.toRow, move.toCol-2));
-                }
-                if (captured) grid[move.toRow][move.toCol-1] = EMPTY;
-            }
-        }
-
-        if (inBounds(move.toRow, move.toCol+1)) {
-            int victim = grid[move.toRow][move.toCol+1];
-
-            if (victim != EMPTY && !sameTeam(victim, piece) && victim != KING) {
-                boolean captured = false;
-                if (inBounds(move.toRow, move.toCol+2)) {
-                    int otherSide = grid[move.toRow][move.toCol+2];
-                    captured = sameTeam(otherSide, piece) || (otherSide == EMPTY && isHostileSquare(move.toRow, move.toCol+2));
-                }
-                if (captured) grid[move.toRow][move.toCol+1] = EMPTY;
-            }
-        }
+        int otherSide = grid[row][col];
+        return sameTeam(otherSide, piece) || (otherSide == EMPTY && isHostileSquare(row, col));
     }
 
     // tous les coups valides pour rouge ou noir
@@ -137,7 +117,12 @@ class Board {
         if (moves.isEmpty()) return evaluate(playerToHelp);
 
         boolean isGoodPlayerTurn = player == playerToHelp;
-        int bestScore = isGoodPlayerTurn ? Integer.MIN_VALUE : Integer.MAX_VALUE;
+        int bestScore;
+        if (isGoodPlayerTurn) {
+            bestScore = Integer.MIN_VALUE;
+        } else {
+            bestScore = Integer.MAX_VALUE;
+        }
 
         for (Move move : moves) {
             Board nextBoard = copy();
