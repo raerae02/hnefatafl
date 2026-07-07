@@ -1,5 +1,8 @@
 public class Move {
-    int fromRow, fromCol, toRow, toCol;
+    final int fromRow;
+    final int fromCol;
+    final int toRow;
+    final int toCol;
 
     Move(int fromRow, int fromCol, int toRow, int toCol) {
         this.fromRow = fromRow;
@@ -10,10 +13,31 @@ public class Move {
 
     static Move parse(String s) {
         s = s.replace(" ", "").trim();
-        String[] parts = s.split("-");
-        int[] from = parseSquare(parts[0]);
-        int[] to = parseSquare(parts[1]);
+        String fromSquare;
+        String toSquare;
+
+        if (s.contains("-")) {
+            String[] parts = s.split("-");
+            fromSquare = parts[0];
+            toSquare = parts[1];
+        } else {
+            int splitIndex = findSecondSquareIndex(s);
+            fromSquare = s.substring(0, splitIndex);
+            toSquare = s.substring(splitIndex);
+        }
+
+        int[] from = parseSquare(fromSquare);
+        int[] to = parseSquare(toSquare);
         return new Move(from[0], from[1], to[0], to[1]);
+    }
+
+    private static int findSecondSquareIndex(String s) {
+        for (int i = 1; i < s.length(); i++) {
+            if (s.charAt(i) >= 'A' && s.charAt(i) <= 'M') {
+                return i;
+            }
+        }
+        throw new IllegalArgumentException("Invalid move: " + s);
     }
 
     static int[] parseSquare(String sq){
