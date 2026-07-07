@@ -3,80 +3,82 @@ import java.util.List;
 
 class Board {
     private int kingRow, kingCol;
+    private static final int DEFAULT_SEARCH_DEPTH = 2;
+    private static final int WIN_SCORE = 100000;
     static final int EMPTY = 0, BLACK = 2, RED = 4, KING = 5;
     int[][] grid;
 
     public Board(int[][] grid){
         this.grid = grid;
-        for (int i = 0; i < 13; i++) {
-            for (int j = 0; j < 13; j++) {
-                if(grid[i][j] == KING){
-                    kingRow = i;
-                    kingCol = j;
+        for (int row = 0; row < 13; row++) {
+            for (int col = 0; col < 13; col++) {
+                if(grid[row][col] == KING){
+                    kingRow = row;
+                    kingCol = col;
                 }
             }
         }
     }
 
-    // apply moves and captures
-    public void applyMove(Move m) {
-        int piece = grid[m.fromRow][m.fromCol];
-        grid[m.toRow][m.toCol] = grid[m.fromRow][m.fromCol];
-        grid[m.fromRow][m.fromCol] = EMPTY;
+    // Deplace une piece et verifie les captures autour.
+    public void applyMove(Move move) {
+        int piece = grid[move.fromRow][move.fromCol];
+        grid[move.toRow][move.toCol] = grid[move.fromRow][move.fromCol];
+        grid[move.fromRow][move.fromCol] = EMPTY;
 
         if (piece == KING) {
-            kingRow = m.toRow;
-            kingCol = m.toCol;
+            kingRow = move.toRow;
+            kingCol = move.toCol;
         }
 
-        if (inBounds(m.toRow-1, m.toCol)) {
-            int victim = grid[m.toRow-1][m.toCol];
+        if (inBounds(move.toRow-1, move.toCol)) {
+            int victim = grid[move.toRow-1][move.toCol];
 
             if (victim != EMPTY && !sameTeam(victim, piece) && victim != KING) {
                 boolean captured = false;
-                if (inBounds(m.toRow-2, m.toCol)) {
-                    int backup = grid[m.toRow-2][m.toCol];
-                    captured = sameTeam(backup, piece) || (backup == EMPTY && isHostileSquare(m.toRow-2, m.toCol));
+                if (inBounds(move.toRow-2, move.toCol)) {
+                    int otherSide = grid[move.toRow-2][move.toCol];
+                    captured = sameTeam(otherSide, piece) || (otherSide == EMPTY && isHostileSquare(move.toRow-2, move.toCol));
                 }
-                if (captured) grid[m.toRow-1][m.toCol] = EMPTY;
+                if (captured) grid[move.toRow-1][move.toCol] = EMPTY;
             }
         }
-        if (inBounds(m.toRow+1, m.toCol)) {
-            int victim = grid[m.toRow+1][m.toCol];
+        if (inBounds(move.toRow+1, move.toCol)) {
+            int victim = grid[move.toRow+1][move.toCol];
 
             if (victim != EMPTY && !sameTeam(victim, piece) && victim != KING) {
                 boolean captured = false;
-                if (inBounds(m.toRow+2, m.toCol)) {
-                    int backup = grid[m.toRow+2][m.toCol];
-                    captured = sameTeam(backup, piece) || (backup == EMPTY && isHostileSquare(m.toRow+2, m.toCol));
+                if (inBounds(move.toRow+2, move.toCol)) {
+                    int otherSide = grid[move.toRow+2][move.toCol];
+                    captured = sameTeam(otherSide, piece) || (otherSide == EMPTY && isHostileSquare(move.toRow+2, move.toCol));
                 }
-                if (captured) grid[m.toRow+1][m.toCol] = EMPTY;
-            }
-        }
-
-        if (inBounds(m.toRow, m.toCol-1)) {
-            int victim = grid[m.toRow][m.toCol-1];
-
-            if (victim != EMPTY && !sameTeam(victim, piece) && victim != KING) {
-                boolean captured = false;
-                if (inBounds(m.toRow, m.toCol-2)) {
-                    int backup = grid[m.toRow][m.toCol-2];
-                    captured = sameTeam(backup, piece) || (backup == EMPTY && isHostileSquare(m.toRow, m.toCol-2));
-                }
-                if (captured) grid[m.toRow][m.toCol-1] = EMPTY;
+                if (captured) grid[move.toRow+1][move.toCol] = EMPTY;
             }
         }
 
-        if (inBounds(m.toRow, m.toCol+1)) {
-            int victim = grid[m.toRow][m.toCol+1];
+        if (inBounds(move.toRow, move.toCol-1)) {
+            int victim = grid[move.toRow][move.toCol-1];
 
             if (victim != EMPTY && !sameTeam(victim, piece) && victim != KING) {
                 boolean captured = false;
-                if (inBounds(m.toRow, m.toCol+2)) {
-                    int backup = grid[m.toRow][m.toCol+2];
-                    captured = sameTeam(backup, piece) || (backup == EMPTY && isHostileSquare(m.toRow, m.toCol+2));
+                if (inBounds(move.toRow, move.toCol-2)) {
+                    int otherSide = grid[move.toRow][move.toCol-2];
+                    captured = sameTeam(otherSide, piece) || (otherSide == EMPTY && isHostileSquare(move.toRow, move.toCol-2));
                 }
-                if (captured) grid[m.toRow][m.toCol+1] = EMPTY;
+                if (captured) grid[move.toRow][move.toCol-1] = EMPTY;
+            }
+        }
+
+        if (inBounds(move.toRow, move.toCol+1)) {
+            int victim = grid[move.toRow][move.toCol+1];
+
+            if (victim != EMPTY && !sameTeam(victim, piece) && victim != KING) {
+                boolean captured = false;
+                if (inBounds(move.toRow, move.toCol+2)) {
+                    int otherSide = grid[move.toRow][move.toCol+2];
+                    captured = sameTeam(otherSide, piece) || (otherSide == EMPTY && isHostileSquare(move.toRow, move.toCol+2));
+                }
+                if (captured) grid[move.toRow][move.toCol+1] = EMPTY;
             }
         }
     }
@@ -84,35 +86,148 @@ class Board {
     // tous les coups valides pour rouge ou noir
     public List<Move> getLegalMoves(int player) {
         List<Move> moves = new ArrayList<>();
-        for (int fr = 0; fr < 13; fr++) {
-            for (int fc = 0; fc < 13; fc++) {
-                int piece = grid[fr][fc];
-                boolean mine = (isAttacker(player)) ? (piece == RED) : (piece == BLACK || piece == KING); // a king is a black piece
-                if(!mine) continue;
-                for (int tc = 0; tc < 13; tc++) {
-                    Move m = new Move(fr, fc, fr, tc);
-                    if (isValidMove(m)) moves.add(m);
+        for (int fromRow = 0; fromRow < 13; fromRow++) {
+            for (int fromCol = 0; fromCol < 13; fromCol++) {
+                int piece = grid[fromRow][fromCol];
+                boolean isMyPiece = (isAttacker(player)) ? (piece == RED) : (piece == BLACK || piece == KING);
+                if(!isMyPiece) continue;
+                for (int toCol = 0; toCol < 13; toCol++) {
+                    Move move = new Move(fromRow, fromCol, fromRow, toCol);
+                    if (isValidMove(move)) moves.add(move);
                 }
-                for (int tr = 0; tr < 13; tr++) {
-                    Move m = new Move(fr, fc, tr, fc);
-                    if (isValidMove(m)) moves.add(m);
+                for (int toRow = 0; toRow < 13; toRow++) {
+                    Move move = new Move(fromRow, fromCol, toRow, fromCol);
+                    if (isValidMove(move)) moves.add(move);
                 }
             }
         }
         return moves;
     }
 
-    public int miniMax(Board b){
-        return -1;
+    public int miniMax(Board board){
+        return board.minimax(DEFAULT_SEARCH_DEPTH, RED, RED);
+    }
+
+    public Move getBestMove(int player, int depth) {
+        List<Move> moves = getLegalMoves(player);
+        if (moves.isEmpty()) return null;
+
+        Move bestMove = null;
+        int bestScore = Integer.MIN_VALUE;
+
+        for (Move move : moves) {
+            Board nextBoard = copy();
+            nextBoard.applyMove(move);
+            int score = nextBoard.alphaBeta(depth - 1, opponent(player), player,
+                    Integer.MIN_VALUE, Integer.MAX_VALUE);
+
+            if (bestMove == null || score > bestScore) {
+                bestScore = score;
+                bestMove = move;
+            }
+        }
+
+        return bestMove;
+    }
+
+    public int minimax(int depth, int player, int playerToHelp) {
+        if (depth == 0 || isTerminal()) return evaluate(playerToHelp);
+
+        List<Move> moves = getLegalMoves(player);
+        if (moves.isEmpty()) return evaluate(playerToHelp);
+
+        boolean isGoodPlayerTurn = player == playerToHelp;
+        int bestScore = isGoodPlayerTurn ? Integer.MIN_VALUE : Integer.MAX_VALUE;
+
+        for (Move move : moves) {
+            Board nextBoard = copy();
+            nextBoard.applyMove(move);
+            int score = nextBoard.minimax(depth - 1, opponent(player), playerToHelp);
+
+            if (isGoodPlayerTurn) {
+                bestScore = Math.max(bestScore, score);
+            } else {
+                bestScore = Math.min(bestScore, score);
+            }
+        }
+
+        return bestScore;
+    }
+
+    public int minimaxAlphaBeta(int depth, int player, int playerToHelp) {
+        return alphaBeta(depth, player, playerToHelp, Integer.MIN_VALUE, Integer.MAX_VALUE);
+    }
+
+    private int alphaBeta(int depth, int player, int playerToHelp, int alpha, int beta) {
+        if (depth == 0 || isTerminal()) return evaluate(playerToHelp);
+
+        List<Move> moves = getLegalMoves(player);
+        if (moves.isEmpty()) return evaluate(playerToHelp);
+
+        if (player == playerToHelp) {
+            int bestScore = Integer.MIN_VALUE;
+            for (Move move : moves) {
+                Board nextBoard = copy();
+                nextBoard.applyMove(move);
+                int score = nextBoard.alphaBeta(depth - 1, opponent(player), playerToHelp, alpha, beta);
+                bestScore = Math.max(bestScore, score);
+                alpha = Math.max(alpha, bestScore);
+                if (beta <= alpha) break;
+            }
+            return bestScore;
+        }
+
+        int bestScore = Integer.MAX_VALUE;
+        for (Move move : moves) {
+            Board nextBoard = copy();
+            nextBoard.applyMove(move);
+            int score = nextBoard.alphaBeta(depth - 1, opponent(player), playerToHelp, alpha, beta);
+            bestScore = Math.min(bestScore, score);
+            beta = Math.min(beta, bestScore);
+            if (beta <= alpha) break;
+        }
+        return bestScore;
+    }
+
+    public int evaluate(int player) {
+        int winner = getWinner();
+        if (winner != 0) {
+            return sameTeam(winner, player) ? WIN_SCORE : -WIN_SCORE;
+        }
+
+        int redPieces = 0;
+        int blackPieces = 0;
+
+        for (int row = 0; row < 13; row++) {
+            for (int col = 0; col < 13; col++) {
+                if (grid[row][col] == RED) redPieces++;
+                if (grid[row][col] == BLACK) blackPieces++;
+            }
+        }
+
+        int material = (blackPieces * 100) - (redPieces * 80);
+        int mobility = (getLegalMoves(BLACK).size() - getLegalMoves(RED).size()) * 2;
+        int kingSafety = kingEscapeScore();
+        int defenderScore = material + mobility + kingSafety;
+
+        return isDefender(player) ? defenderScore : -defenderScore;
+    }
+
+    public Board copy() {
+        int[][] copiedGrid = new int[13][13];
+        for (int row = 0; row < 13; row++) {
+            System.arraycopy(grid[row], 0, copiedGrid[row], 0, 13);
+        }
+        return new Board(copiedGrid);
     }
 
     public boolean isTerminal() { return getWinner() != 0; }
 
     public int getWinner() {
-        // black win : king is in the corner
+        // noir gagne si le roi arrive dans un coin
         if (isCorner(kingRow, kingCol)) return BLACK;
 
-        // red win : king is blocked from all 4 sides
+        // rouge gagne si le roi est bloque des 4 cotes
         if (isBlockedForKing(kingRow-1, kingCol) &&
                 isBlockedForKing(kingRow+1, kingCol) &&
                 isBlockedForKing(kingRow, kingCol-1) &&
@@ -123,36 +238,36 @@ class Board {
 
     public void print() {
         char[] symbols = {'.', '?', 'N', '?', 'R', 'K'};
-        for (int r = 0; r < 13; r++) {
-            System.out.printf("%2d  ", 13 - r);
-            for (int c = 0; c < 13; c++) {
-                System.out.print(symbols[grid[r][c]] + " ");
+        for (int row = 0; row < 13; row++) {
+            System.out.printf("%2d  ", 13 - row);
+            for (int col = 0; col < 13; col++) {
+                System.out.print(symbols[grid[row][col]] + " ");
             }
             System.out.println();
         }
         System.out.println("    A B C D E F G H I J K L M");
     }
 
-    private boolean isValidMove(Move m){
-        int piece = grid[m.fromRow][m.fromCol];
+    private boolean isValidMove(Move move){
+        int piece = grid[move.fromRow][move.fromCol];
 
         if(piece == EMPTY) return false;
 
-        if(grid[m.toRow][m.toCol] != EMPTY) return false;
+        if(grid[move.toRow][move.toCol] != EMPTY) return false;
 
-        boolean isThrone = isThrone(m.toRow, m.toCol);
-        boolean isCorner = isCorner(m.toRow, m.toCol);
+        boolean moveEndsOnThrone = isThrone(move.toRow, move.toCol);
+        boolean moveEndsOnCorner = isCorner(move.toRow, move.toCol);
 
-        // king rules
-        if ((isThrone || isCorner) && piece != KING) return false;
+        // seulement le roi peut aller sur le trone ou dans un coin
+        if ((moveEndsOnThrone || moveEndsOnCorner) && piece != KING) return false;
 
-        // not a diagonal move
-        if (m.fromRow != m.toRow && m.fromCol != m.toCol) return false;
+        // pas de mouvement en diagonale
+        if (move.fromRow != move.toRow && move.fromCol != move.toCol) return false;
 
-        // the piece actually move
-        if(m.fromRow == m.toRow && m.fromCol == m.toCol) return false;
+        // la piece doit vraiment bouger
+        if(move.fromRow == move.toRow && move.fromCol == move.toCol) return false;
 
-        return isPathClear(m);
+        return isPathClear(move);
     }
 
     private boolean isCorner(int row, int col) {
@@ -163,14 +278,14 @@ class Board {
         return row == 6 && col == 6;
     }
 
-    private boolean isPathClear(Move m){
-        int rowDirection = Integer.signum(m.toRow - m.fromRow);
-        int colDirection = Integer.signum(m.toCol - m.fromCol);
+    private boolean isPathClear(Move move){
+        int rowDirection = Integer.signum(move.toRow - move.fromRow);
+        int colDirection = Integer.signum(move.toCol - move.fromCol);
 
-        int row = m.fromRow + rowDirection;
-        int col = m.fromCol + colDirection;
+        int row = move.fromRow + rowDirection;
+        int col = move.fromCol + colDirection;
 
-        while (row != m.toRow || col != m.toCol){
+        while (row != move.toRow || col != move.toCol){
             if(grid[row][col] != EMPTY) return false;
             row += rowDirection;
             col += colDirection;
@@ -179,12 +294,12 @@ class Board {
         return true;
     }
 
-    private boolean isDefender(int p) { return p == BLACK || p == KING; }
+    private boolean isDefender(int piece) { return piece == BLACK || piece == KING; }
 
-    private boolean isAttacker(int p) { return p == RED; }
+    private boolean isAttacker(int piece) { return piece == RED; }
 
-    private boolean sameTeam(int a, int b) {
-        return (isAttacker(a) && isAttacker(b)) || (isDefender(a) && isDefender(b));
+    private boolean sameTeam(int firstPiece, int secondPiece) {
+        return (isAttacker(firstPiece) && isAttacker(secondPiece)) || (isDefender(firstPiece) && isDefender(secondPiece));
     }
 
     private boolean isHostileSquare(int row, int col) {
@@ -202,5 +317,44 @@ class Board {
         if (isCorner(row, col)) return true;
         if (isThrone(row, col)) return true;
         return grid[row][col] == RED;
+    }
+
+    private int opponent(int player) {
+        return isAttacker(player) ? BLACK : RED;
+    }
+
+    private int kingEscapeScore() {
+        int closestCorner = Math.min(
+                Math.min(kingRow + kingCol, kingRow + (12 - kingCol)),
+                Math.min((12 - kingRow) + kingCol, (12 - kingRow) + (12 - kingCol))
+        );
+
+        int score = (24 - closestCorner) * 10;
+        score += openKingLineScore(0, -1);
+        score += openKingLineScore(0, 1);
+        score += openKingLineScore(-1, 0);
+        score += openKingLineScore(1, 0);
+
+        int blockers = 0;
+        if (isBlockedForKing(kingRow - 1, kingCol)) blockers++;
+        if (isBlockedForKing(kingRow + 1, kingCol)) blockers++;
+        if (isBlockedForKing(kingRow, kingCol - 1)) blockers++;
+        if (isBlockedForKing(kingRow, kingCol + 1)) blockers++;
+
+        return score - (blockers * 30);
+    }
+
+    private int openKingLineScore(int rowDirection, int colDirection) {
+        int row = kingRow + rowDirection;
+        int col = kingCol + colDirection;
+
+        while (inBounds(row, col)) {
+            if (grid[row][col] != EMPTY) return 0;
+            if (isCorner(row, col)) return 250;
+            row += rowDirection;
+            col += colDirection;
+        }
+
+        return 0;
     }
 }

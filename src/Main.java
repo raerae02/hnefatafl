@@ -8,6 +8,8 @@ public class Main {
         test6_captureActiveSeulement();
         test7_bordNeCapturePas();
         test8_roiSandwichPasCapture();
+        test9_minimaxAlphaBetaMemeScore();
+        test10_iaPrendVictoireImmediate();
     }
 
     static void test1_captureSimple() {
@@ -137,5 +139,36 @@ public class Main {
 
         boolean ok = (b.getWinner() == 0);   // partie PAS finie : haut et bas du roi sont libres
         System.out.println(ok ? "PASS : roi survit au sandwich" : "FAIL : roi capturé a 2 (bug!)");
+    }
+
+    static void test9_minimaxAlphaBetaMemeScore() {
+        System.out.println("Test 9 : minimax et alpha-beta donnent le meme score");
+        int[][] g = new int[13][13];
+        g[6][6] = Board.KING;
+        g[6][4] = Board.BLACK;
+        g[4][6] = Board.BLACK;
+        g[6][2] = Board.RED;
+        g[2][6] = Board.RED;
+
+        Board b = new Board(g);
+
+        int minimaxScore = b.minimax(2, Board.BLACK, Board.BLACK);
+        int alphaBetaScore = b.minimaxAlphaBeta(2, Board.BLACK, Board.BLACK);
+        boolean ok = minimaxScore == alphaBetaScore;
+
+        System.out.println(ok ? "PASS : scores identiques" : "FAIL : scores differents");
+    }
+
+    static void test10_iaPrendVictoireImmediate() {
+        System.out.println("Test 10 : IA choisit une victoire immediate");
+        int[][] g = new int[13][13];
+        g[0][5] = Board.KING;
+        g[5][5] = Board.RED;
+
+        Board b = new Board(g);
+        Move bestMove = b.getBestMove(Board.BLACK, 1);
+        boolean ok = bestMove != null && bestMove.toRow == 0 && bestMove.toCol == 0;
+
+        System.out.println(ok ? "PASS : roi va au coin" : "FAIL : meilleur coup inattendu");
     }
 }
