@@ -57,4 +57,16 @@ public class Move {
     public String toString() {
         return toSquare(fromRow, fromCol) + "-" + toSquare(toRow, toCol);
     }
+
+    @Override
+    public boolean equals(Object other) {
+        if (!(other instanceof Move move)) return false;
+        return fromRow == move.fromRow && fromCol == move.fromCol
+                && toRow == move.toRow && toCol == move.toCol;
+    }
+
+    @Override
+    public int hashCode() {
+        return PackedMove.pack(this);
+    }
 }

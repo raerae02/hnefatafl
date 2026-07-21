@@ -21,10 +21,13 @@ class Client {
             input = new BufferedInputStream(MyClient.getInputStream());
             output = new BufferedOutputStream(MyClient.getOutputStream());
 
-            while (1 == 1) {
-                char cmd = 0;
-
-                cmd = (char) input.read();
+            while (true) {
+                int command = input.read();
+                if (command == -1) {
+                    System.out.println("Connexion au serveur fermee.");
+                    break;
+                }
+                char cmd = (char) command;
                 System.out.println(cmd);
 
                 // Debut de la partie en joueur blanc
@@ -35,7 +38,7 @@ class Client {
 
                     player = Board.RED;
                     gameBoard = new Board(board);
-                    cpu = new CPUPlayer(player);
+                    cpu = EngineConfig.createPlayer(player);
                     session.reset(gameBoard);
 
                     System.out.println("Nouvelle partie! Vous jouer blanc.");
@@ -51,7 +54,7 @@ class Client {
 
                     player = Board.BLACK;
                     gameBoard = new Board(board);
-                    cpu = new CPUPlayer(player);
+                    cpu = EngineConfig.createPlayer(player);
                     session.reset(gameBoard);
                 }
 
@@ -62,7 +65,7 @@ class Client {
                     System.out.println("Dernier coup :" + s);
 
                     if (gameBoard != null && cpu != null) {
-                        applyOpponentMove(gameBoard, s);
+                        applyOpponentMove(gameBoard, s, player);
                         sendCpuMove(gameBoard, cpu, output);
                     }
                 }
@@ -109,7 +112,7 @@ class Client {
         return board;
     }
 
-    private static void applyOpponentMove(Board gameBoard, String moveText) {
+    private static void applyOpponentMove(Board gameBoard, String moveText, int cpuSide) {
         session.clearLastOwnMove();
 
         if (moveText.length() == 0 || moveText.equals("A0-A0") || moveText.equals("A0A0")) {
@@ -123,9 +126,9 @@ class Client {
         }
 
         gameBoard.applyMove(move);
-        session.recordPosition(gameBoard);
+        session.recordPosition(gameBoard, cpuSide);
 
-        if (session.isRepeatedPosition(gameBoard)) {
+        if (session.isRepeatedPosition(gameBoard, cpuSide)) {
             System.out.println("Position repetee detectee apres coup adverse.");
         }
     }
@@ -139,10 +142,11 @@ class Client {
         }
 
         MoveUndo undo = gameBoard.makeMove(move);
-        session.rememberOwnMove(move, undo);
-        session.recordPosition(gameBoard);
+        int nextSide = cpu.getSide() == Board.RED ? Board.BLACK : Board.RED;
+        session.rememberOwnMove(move, undo, nextSide);
+        session.recordPosition(gameBoard, nextSide);
 
-        if (session.isRepeatedPosition(gameBoard)) {
+        if (session.isRepeatedPosition(gameBoard, nextSide)) {
             System.out.println("Position repetee detectee apres notre coup.");
         }
 

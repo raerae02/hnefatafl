@@ -14,12 +14,22 @@ class Board {
             {BOARD_SIZE - 1, BOARD_SIZE - 1}
     };
 
-    private int kingRow, kingCol;
+    private int kingRow = -1, kingCol = -1;
     static final int EMPTY = 0, BLACK = 2, RED = 4, KING = 5;
     private static final int HASH_PIECES = 3;
     private static final long[][][] ZOBRIST_TABLE = new long[BOARD_SIZE][BOARD_SIZE][HASH_PIECES];
     private static boolean zobristInitialized = false;
-    int[][] grid;
+    /** Compatibility view for the client and legacy tests; bitboards are authoritative. */
+    final int[][] grid = new int[BOARD_SIZE][BOARD_SIZE];
+    private long redLow, redMiddle, redHigh;
+    private long blackLow, blackMiddle, blackHigh;
+    private long kingLow, kingMiddle, kingHigh;
+    private long zobristHash;
+    private final int[] evaluationMoveBuffer = new int[4096];
+    private final int[] evaluationReplyBuffer = new int[4096];
+    private final SearchUndo evaluationPrimaryUndo = new SearchUndo();
+    private final SearchUndo evaluationReplyUndo = new SearchUndo();
+    private static final int[][][] RAYS = buildRays();
 
     public int getKingRow() {
         return kingRow;
@@ -29,7 +39,11 @@ class Board {
     }
 
     public int getPiece(int row, int col) {
-        return grid[row][col];
+        int square = BitBoard169.square(row, col);
+        if (containsKing(square)) return KING;
+        if (containsRed(square)) return RED;
+        if (containsBlack(square)) return BLACK;
+        return EMPTY;
     }
 
     public int getOpenKingLines() {
@@ -38,11 +52,18 @@ class Board {
 
 
 
-    public Board(int[][] grid){
-        this.grid = grid;
+    public Board(int[][] source){
+        initZobrist();
         for (int i = 0; i < BOARD_SIZE; i++) {
             for (int j = 0; j < BOARD_SIZE; j++) {
-                if(grid[i][j] == KING){
+                int piece = source[i][j];
+                grid[i][j] = piece;
+                if (piece != EMPTY) {
+                    int square = BitBoard169.square(i, j);
+                    addPiece(square, piece);
+                    zobristHash ^= ZOBRIST_TABLE[i][j][pieceToHashIndex(piece)];
+                }
+                if(piece == KING){
                     kingRow = i;
                     kingCol = j;
                 }
@@ -73,7 +94,9 @@ class Board {
                 if (undo != null) {
                     undo.addCapturedPiece(victimRow, victimCol, victim);
                 }
+                removePiece(BitBoard169.square(victimRow, victimCol), victim);
                 grid[victimRow][victimCol] = EMPTY;
+                zobristHash ^= ZOBRIST_TABLE[victimRow][victimCol][pieceToHashIndex(victim)];
             }
         }
     }
@@ -87,24 +110,82 @@ class Board {
 
     public MoveUndo makeMove(Move move) {
         int piece = grid[move.fromRow][move.fromCol];
-        MoveUndo undo = new MoveUndo(piece, kingRow, kingCol);
+        MoveUndo undo = new MoveUndo(piece, kingRow, kingCol, zobristHash);
 
         movePiece(move, piece);
         captureAround(move.toRow, move.toCol, piece, undo);
         return undo;
     }
 
+    void makeMovePacked(int packed, SearchUndo undo) {
+        int from = PackedMove.from(packed), to = PackedMove.to(packed);
+        int fromRow = BitBoard169.row(from), fromCol = BitBoard169.col(from);
+        int toRow = BitBoard169.row(to), toCol = BitBoard169.col(to);
+        int piece = getPiece(fromRow, fromCol);
+        undo.reset(piece, kingRow, kingCol, zobristHash);
+        movePieceSquares(from, to, fromRow, fromCol, toRow, toCol, piece);
+        captureAroundPacked(toRow, toCol, piece, undo);
+    }
+
+    void unmakeMovePacked(int packed, SearchUndo undo) {
+        int from = PackedMove.from(packed), to = PackedMove.to(packed);
+        int fromRow = BitBoard169.row(from), fromCol = BitBoard169.col(from);
+        int toRow = BitBoard169.row(to), toCol = BitBoard169.col(to);
+        removePiece(to, undo.movedPiece);
+        addPiece(from, undo.movedPiece);
+        grid[fromRow][fromCol] = undo.movedPiece;
+        grid[toRow][toCol] = EMPTY;
+        kingRow = undo.oldKingRow;
+        kingCol = undo.oldKingCol;
+        for (int i = 0; i < undo.capturedCount; i++) {
+            int square = undo.capturedSquares[i], piece = undo.capturedPieces[i];
+            addPiece(square, piece);
+            grid[BitBoard169.row(square)][BitBoard169.col(square)] = piece;
+        }
+        zobristHash = undo.oldHash;
+    }
+
+    private void captureAroundPacked(int row, int col, int piece, SearchUndo undo) {
+        for (int[] direction : DIRECTIONS) {
+            int victimRow = row + direction[0], victimCol = col + direction[1];
+            int backupRow = row + 2 * direction[0], backupCol = col + 2 * direction[1];
+            if (!inBounds(victimRow, victimCol)) continue;
+            int victim = getPiece(victimRow, victimCol);
+            if (victim == EMPTY || victim == KING || sameTeam(victim, piece)) continue;
+            if (shouldCapture(backupRow, backupCol, piece)) {
+                int square = BitBoard169.square(victimRow, victimCol);
+                undo.capture(square, victim);
+                removePiece(square, victim);
+                grid[victimRow][victimCol] = EMPTY;
+                zobristHash ^= ZOBRIST_TABLE[victimRow][victimCol][pieceToHashIndex(victim)];
+            }
+        }
+    }
+
     private void movePiece(Move move, int piece) {
-        grid[move.toRow][move.toCol] = piece;
-        grid[move.fromRow][move.fromCol] = EMPTY;
+        int from = BitBoard169.square(move.fromRow, move.fromCol);
+        int to = BitBoard169.square(move.toRow, move.toCol);
+        movePieceSquares(from, to, move.fromRow, move.fromCol, move.toRow, move.toCol, piece);
+    }
+
+    private void movePieceSquares(int from, int to, int fromRow, int fromCol,
+                                  int toRow, int toCol, int piece) {
+        removePiece(from, piece);
+        addPiece(to, piece);
+        zobristHash ^= ZOBRIST_TABLE[fromRow][fromCol][pieceToHashIndex(piece)];
+        zobristHash ^= ZOBRIST_TABLE[toRow][toCol][pieceToHashIndex(piece)];
+        grid[toRow][toCol] = piece;
+        grid[fromRow][fromCol] = EMPTY;
 
         if (piece == KING) {
-            kingRow = move.toRow;
-            kingCol = move.toCol;
+            kingRow = toRow;
+            kingCol = toCol;
         }
     }
 
     public void unmakeMove(Move move, MoveUndo undo) {
+        removePiece(BitBoard169.square(move.toRow, move.toCol), undo.movedPiece);
+        addPiece(BitBoard169.square(move.fromRow, move.fromCol), undo.movedPiece);
         grid[move.fromRow][move.fromCol] = undo.movedPiece;
         grid[move.toRow][move.toCol] = EMPTY;
 
@@ -112,37 +193,48 @@ class Board {
         kingCol = undo.oldKingCol;
 
         for (CapturedPiece capturedPiece : undo.capturedPieces) {
+            addPiece(BitBoard169.square(capturedPiece.row, capturedPiece.col), capturedPiece.piece);
             grid[capturedPiece.row][capturedPiece.col] = capturedPiece.piece;
         }
+        zobristHash = undo.oldHash;
     }
 
     // tous les coups valides pour rouge ou noir
     public List<Move> getLegalMoves(int player) {
         List<Move> moves = new ArrayList<>();
+        int[] packed = new int[4096];
+        int count = getLegalPackedMoves(player, packed);
+        for (int i = 0; i < count; i++) moves.add(PackedMove.unpack(packed[i]));
+        return moves;
+    }
 
-        for (int fr = 0; fr < BOARD_SIZE; fr++) {
-            for (int fc = 0; fc < BOARD_SIZE; fc++) {
-                int piece = grid[fr][fc];
-                boolean mine = (isAttacker(player)) ? (piece == RED) : (piece == BLACK || piece == KING); // a king is a black piece
-                if(!mine) continue;
+    int getLegalPackedMoves(int player, int[] moves) {
+        int count = 0;
+        for (int square = 0; square < BOARD_SIZE * BOARD_SIZE; square++) {
+            int piece = getPiece(BitBoard169.row(square), BitBoard169.col(square));
+            boolean mine = player == RED ? piece == RED : piece == BLACK || piece == KING;
+            if (!mine) continue;
 
-                for (int[] direction : DIRECTIONS) {
-                    int tr = fr + direction[0];
-                    int tc = fc + direction[1];
-
-                    while (inBounds(tr, tc) && grid[tr][tc] == EMPTY) {
-                        if (piece == KING || (!isThrone(tr, tc) && !isCorner(tr, tc))) {
-                            moves.add(new Move(fr, fc, tr, tc));
-                        }
-
-                        tr += direction[0];
-                        tc += direction[1];
+            for (int direction = 0; direction < DIRECTIONS.length; direction++) {
+                for (int target : RAYS[square][direction]) {
+                    if (isOccupied(target)) break;
+                    int row = BitBoard169.row(target);
+                    int col = BitBoard169.col(target);
+                    if (piece == KING || (!BoardGeometry.THRONE.contains(target)
+                            && !BoardGeometry.CORNERS.contains(target))) {
+                        if (count >= moves.length) throw new IllegalArgumentException("Move buffer too small");
+                        moves[count++] = PackedMove.pack(square, target);
                     }
                 }
             }
         }
-        return moves;
+        return count;
     }
+
+    int[] evaluationMoveBuffer() { return evaluationMoveBuffer; }
+    int[] evaluationReplyBuffer() { return evaluationReplyBuffer; }
+    SearchUndo evaluationPrimaryUndo() { return evaluationPrimaryUndo; }
+    SearchUndo evaluationReplyUndo() { return evaluationReplyUndo; }
 
     public Board copy() {
         int[][] newGrid = new int[BOARD_SIZE][BOARD_SIZE];
@@ -157,6 +249,7 @@ class Board {
     public int evaluate(int cpuPlayer) {
         return new BoardEvaluator(this).evaluate(cpuPlayer);
     }
+
 
     public int countCapturesIfMove(Move move) {
         int piece = grid[move.fromRow][move.fromCol];
@@ -181,6 +274,33 @@ class Board {
         return captures;
     }
 
+    int countCapturesIfPacked(int packed) {
+        int from = PackedMove.from(packed);
+        int to = PackedMove.to(packed);
+        int fromRow = BitBoard169.row(from), fromCol = BitBoard169.col(from);
+        int toRow = BitBoard169.row(to), toCol = BitBoard169.col(to);
+        int piece = getPiece(fromRow, fromCol);
+        int captures = 0;
+        for (int[] direction : DIRECTIONS) {
+            int victimRow = toRow + direction[0], victimCol = toCol + direction[1];
+            int backupRow = toRow + 2 * direction[0], backupCol = toCol + 2 * direction[1];
+            if (!inBounds(victimRow, victimCol) || !inBounds(backupRow, backupCol)) continue;
+            int victim = getPieceAfterPacked(victimRow, victimCol, fromRow, fromCol, toRow, toCol, piece);
+            if (victim == EMPTY || victim == KING || sameTeam(victim, piece)) continue;
+            int backup = getPieceAfterPacked(backupRow, backupCol, fromRow, fromCol, toRow, toCol, piece);
+            if (backup == KING || sameTeam(backup, piece)
+                    || (backup == EMPTY && isHostileSquare(backupRow, backupCol))) captures++;
+        }
+        return captures;
+    }
+
+    private int getPieceAfterPacked(int row, int col, int fromRow, int fromCol,
+                                    int toRow, int toCol, int piece) {
+        if (row == fromRow && col == fromCol) return EMPTY;
+        if (row == toRow && col == toCol) return piece;
+        return getPiece(row, col);
+    }
+
     private boolean shouldCaptureAfterMove(int backupRow, int backupCol, Move move, int piece) {
         if (!inBounds(backupRow, backupCol)) return false;
 
@@ -201,6 +321,7 @@ class Board {
     public boolean isTerminal() { return getWinner() != 0; }
 
     public int getWinner() {
+      if (kingRow < 0 || kingCol < 0) return RED;
       if (isCorner(kingRow, kingCol)) return BLACK;
       if (isKingCaptured()) return RED;
       return 0;
@@ -357,55 +478,88 @@ class Board {
     }
 
     public int countPieces(int player){
-        int count = 0;
-
-        for (int row = 0; row < BOARD_SIZE; row++) {
-            for (int col = 0; col < BOARD_SIZE; col++) {
-                int piece =  grid[row][col];
-
-                if(player == Board.RED){
-                    if(piece == Board.RED){
-                        count++;
-                    }
-                }else if(player == Board.BLACK){
-                    if(piece == Board.BLACK || piece == Board.KING){
-                        count++;
-                    }
-                }
-            }
-
-        }
-        return count;
+        if (player == RED) return BitBoard169.count(redLow, redMiddle, redHigh);
+        return BitBoard169.count(blackLow, blackMiddle, blackHigh)
+                + BitBoard169.count(kingLow, kingMiddle, kingHigh);
 
     }
 
     public long computeHash() {
-        initZobrist();
-
-        long hash = 0L;
-        for (int row = 0; row < BOARD_SIZE; row++) {
-            for (int col = 0; col < BOARD_SIZE; col++) {
-                int piece = grid[row][col];
-                if (piece != EMPTY) {
-                    hash ^= ZOBRIST_TABLE[row][col][pieceToHashIndex(piece)];
-                }
-            }
-        }
-
-        return hash;
+        return zobristHash;
     }
 
     public String positionKey() {
-        StringBuilder builder = new StringBuilder(BOARD_SIZE * BOARD_SIZE * 2);
+        return Long.toHexString(redLow) + ':' + Long.toHexString(redMiddle) + ':' + Long.toHexString(redHigh)
+                + ':' + Long.toHexString(blackLow) + ':' + Long.toHexString(blackMiddle) + ':' + Long.toHexString(blackHigh)
+                + ':' + Long.toHexString(kingLow) + ':' + Long.toHexString(kingMiddle) + ':' + Long.toHexString(kingHigh);
+    }
 
-        for (int row = 0; row < BOARD_SIZE; row++) {
-            for (int col = 0; col < BOARD_SIZE; col++) {
-                builder.append(grid[row][col]);
-                builder.append(',');
+    public String positionKey(int sideToMove) {
+        return positionKey() + ':' + sideToMove;
+    }
+
+    PositionKey exactKey(int sideToMove) {
+        return new PositionKey(redLow, redMiddle, redHigh, blackLow, blackMiddle, blackHigh,
+                kingLow, kingMiddle, kingHigh, sideToMove);
+    }
+
+    private boolean containsRed(int square) { return BitBoard169.contains(redLow, redMiddle, redHigh, square); }
+    private boolean containsBlack(int square) { return BitBoard169.contains(blackLow, blackMiddle, blackHigh, square); }
+    private boolean containsKing(int square) { return BitBoard169.contains(kingLow, kingMiddle, kingHigh, square); }
+    private boolean isOccupied(int square) { return containsRed(square) || containsBlack(square) || containsKing(square); }
+
+    private void addPiece(int square, int piece) {
+        setPieceBit(square, piece, true);
+    }
+
+    private void removePiece(int square, int piece) {
+        setPieceBit(square, piece, false);
+    }
+
+    private void setPieceBit(int square, int piece, boolean present) {
+        int segment = square >>> 6;
+        long bit = 1L << (square & 63);
+        if (piece == RED) {
+            if (segment == 0) redLow = present ? redLow | bit : redLow & ~bit;
+            else if (segment == 1) redMiddle = present ? redMiddle | bit : redMiddle & ~bit;
+            else redHigh = present ? redHigh | bit : redHigh & ~bit;
+        } else if (piece == BLACK) {
+            if (segment == 0) blackLow = present ? blackLow | bit : blackLow & ~bit;
+            else if (segment == 1) blackMiddle = present ? blackMiddle | bit : blackMiddle & ~bit;
+            else blackHigh = present ? blackHigh | bit : blackHigh & ~bit;
+        } else if (piece == KING) {
+            if (segment == 0) kingLow = present ? kingLow | bit : kingLow & ~bit;
+            else if (segment == 1) kingMiddle = present ? kingMiddle | bit : kingMiddle & ~bit;
+            else kingHigh = present ? kingHigh | bit : kingHigh & ~bit;
+        }
+    }
+
+    private static int[][][] buildRays() {
+        int[][][] rays = new int[BOARD_SIZE * BOARD_SIZE][DIRECTIONS.length][];
+        for (int square = 0; square < rays.length; square++) {
+            int row = BitBoard169.row(square);
+            int col = BitBoard169.col(square);
+            for (int d = 0; d < DIRECTIONS.length; d++) {
+                int length = 0;
+                int r = row + DIRECTIONS[d][0];
+                int c = col + DIRECTIONS[d][1];
+                while (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
+                    length++;
+                    r += DIRECTIONS[d][0];
+                    c += DIRECTIONS[d][1];
+                }
+                int[] ray = new int[length];
+                r = row + DIRECTIONS[d][0];
+                c = col + DIRECTIONS[d][1];
+                for (int i = 0; i < length; i++) {
+                    ray[i] = BitBoard169.square(r, c);
+                    r += DIRECTIONS[d][0];
+                    c += DIRECTIONS[d][1];
+                }
+                rays[square][d] = ray;
             }
         }
-
-        return builder.toString();
+        return rays;
     }
 
     private static void initZobrist() {

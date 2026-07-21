@@ -8,12 +8,13 @@ class GameSession {
     private final Map<String, Set<String>> rejectedMovesByPosition = new HashMap<>();
     private Move lastOwnMove;
     private MoveUndo lastOwnUndo;
+    private int lastOwnNextSide;
 
     void reset(Board board) {
         positionHistory.clear();
         rejectedMovesByPosition.clear();
         clearLastOwnMove();
-        recordPosition(board);
+        recordPosition(board, Board.RED);
     }
 
     Map<String, Integer> positionHistory() {
@@ -21,7 +22,11 @@ class GameSession {
     }
 
     void recordPosition(Board board) {
-        String key = board.positionKey();
+        recordPosition(board, 0);
+    }
+
+    void recordPosition(Board board, int sideToMove) {
+        String key = sideToMove == 0 ? board.positionKey() : board.positionKey(sideToMove);
         int count = positionHistory.getOrDefault(key, 0);
         positionHistory.put(key, count + 1);
     }
@@ -37,9 +42,20 @@ class GameSession {
         }
     }
 
+    void forgetPosition(Board board, int sideToMove) {
+        String key = board.positionKey(sideToMove);
+        int count = positionHistory.getOrDefault(key, 0);
+        if (count <= 1) positionHistory.remove(key);
+        else positionHistory.put(key, count - 1);
+    }
+
     boolean isRepeatedPosition(Board board) {
         String key = board.positionKey();
         return positionHistory.getOrDefault(key, 0) >= 2;
+    }
+
+    boolean isRepeatedPosition(Board board, int sideToMove) {
+        return positionHistory.getOrDefault(board.positionKey(sideToMove), 0) >= 3;
     }
 
     void rememberRejectedMove(Board board, Move move) {
@@ -68,8 +84,13 @@ class GameSession {
     }
 
     void rememberOwnMove(Move move, MoveUndo undo) {
+        rememberOwnMove(move, undo, 0);
+    }
+
+    void rememberOwnMove(Move move, MoveUndo undo, int nextSide) {
         lastOwnMove = move;
         lastOwnUndo = undo;
+        lastOwnNextSide = nextSide;
     }
 
     Move lastOwnMove() {
@@ -81,7 +102,8 @@ class GameSession {
             return;
         }
 
-        forgetPosition(board);
+        if (lastOwnNextSide == 0) forgetPosition(board);
+        else forgetPosition(board, lastOwnNextSide);
         board.unmakeMove(lastOwnMove, lastOwnUndo);
         clearLastOwnMove();
     }
@@ -89,5 +111,6 @@ class GameSession {
     void clearLastOwnMove() {
         lastOwnMove = null;
         lastOwnUndo = null;
+        lastOwnNextSide = 0;
     }
 }

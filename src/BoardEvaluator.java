@@ -6,10 +6,14 @@ class BoardEvaluator {
 
     private final Board board;
     private final int[][] grid;
+    private final int[] moveBuffer;
+    private final int[] replyBuffer;
 
     BoardEvaluator(Board board) {
         this.board = board;
         this.grid = board.grid;
+        this.moveBuffer = board.evaluationMoveBuffer();
+        this.replyBuffer = board.evaluationReplyBuffer();
     }
 
     int evaluate(int cpuPlayer) {
@@ -21,28 +25,151 @@ class BoardEvaluator {
             return -WIN_SCORE;
         }
 
-        int redScore = evaluateMaterialForRed()
+        RouteMetrics routes = analyzeKingRoutes();
+        TacticalEscapeMetrics tactical = analyzeUnblockableEscapes(cpuPlayer);
+        int redScore = weightedRedScore(routes, tactical);
+        int blackScore = weightedBlackScore(routes, tactical);
+
+        if (cpuPlayer == Board.RED) {
+            return redScore - blackScore;
+        }
+        return blackScore - redScore;
+    }
+
+    private int weightedRedScore(RouteMetrics routes, TacticalEscapeMetrics tactical) {
+        return evaluateMaterialForRed()
                 + evaluateKingPressure()
                 + evaluateCornerControl()
                 + evaluateKingEscapeBlockers()
                 + evaluateRedFrontLines()
                 + evaluateEdgeEscapeContainment()
                 + evaluateCapturePotential(Board.RED)
-                + evaluateMobility(Board.RED);
+                + evaluateMobility(Board.RED)
+                + routes.redMeanDistance()
+                + routes.redDistanceVariance()
+                + tactical.redUnblockableEscapePenalty()
+                + tactical.redInterceptionMobility();
+    }
 
-        int blackScore = evaluateMaterialForBlack()
+    private int weightedBlackScore(RouteMetrics routes, TacticalEscapeMetrics tactical) {
+        return evaluateMaterialForBlack()
                 + evaluateKingEscape()
                 + evaluateKingSafety()
                 + evaluateKingSupport()
                 + evaluateDefenderCorridors()
                 + evaluateEdgeEscapeThreat()
                 + evaluateCapturePotential(Board.BLACK)
-                + evaluateMobility(Board.BLACK);
+                + evaluateMobility(Board.BLACK)
+                + routes.blackMeanDistance()
+                + routes.blackDistanceVariance()
+                + tactical.blackUnblockableEscapeBonus()
+                + tactical.blackInterceptionMobility();
+    }
 
-        if (cpuPlayer == Board.RED) {
-            return redScore - blackScore;
+    /** KDV across the two rook routes to each corner: eight routes in total. */
+    private RouteMetrics analyzeKingRoutes() {
+        long total = 0;
+        long squaredTotal = 0;
+        for (int[] corner : Board.CORNERS) {
+            int viaEdgeRow = routeCost(kingRow(), kingCol(), corner[0], kingCol(), corner[0], corner[1]);
+            int viaEdgeCol = routeCost(kingRow(), kingCol(), kingRow(), corner[1], corner[0], corner[1]);
+            total += viaEdgeRow + viaEdgeCol;
+            squaredTotal += (long) viaEdgeRow * viaEdgeRow + (long) viaEdgeCol * viaEdgeCol;
         }
-        return blackScore - redScore;
+        int mean = (int) (total / 8);
+        int variance = (int) (squaredTotal / 8 - (long) mean * mean);
+        int meanScore = mean * 150;
+        int varianceScore = variance * 25;
+        // RED wants a high mean and low variance; BLACK wants the inverse.
+        return new RouteMetrics(meanScore, -varianceScore, -meanScore, varianceScore);
+    }
+
+    private int routeCost(int startRow, int startCol, int viaRow, int viaCol, int cornerRow, int cornerCol) {
+        return segmentCost(startRow, startCol, viaRow, viaCol)
+                + segmentCost(viaRow, viaCol, cornerRow, cornerCol);
+    }
+
+    private int segmentCost(int fromRow, int fromCol, int toRow, int toCol) {
+        if (fromRow == toRow && fromCol == toCol) return 0;
+        int rowStep = Integer.signum(toRow - fromRow);
+        int colStep = Integer.signum(toCol - fromCol);
+        int cost = 0;
+        int row = fromRow + rowStep;
+        int col = fromCol + colStep;
+        while (row != toRow || col != toCol) {
+            cost += kdvSquareCost(row, col);
+            row += rowStep;
+            col += colStep;
+        }
+        return cost + kdvSquareCost(toRow, toCol);
+    }
+
+    private int kdvSquareCost(int row, int col) {
+        int piece = grid[row][col];
+        if (piece == Board.EMPTY) return 1;
+        if (piece == Board.BLACK || piece == Board.KING) return 2;
+        return 4;
+    }
+
+    /**
+     * A two-ply forced escape: BLACK moves the king, RED replies in every legal
+     * possible way, and BLACK still has an immediate corner move. This is only
+     * meaningful when BLACK is the side to move at the evaluated leaf.
+     */
+    private TacticalEscapeMetrics analyzeUnblockableEscapes(int sideToMove) {
+        if (sideToMove != Board.BLACK) return TacticalEscapeMetrics.NONE;
+        int forcedEscapes = 0;
+        int stoppingReplies = 0;
+        int blackMoveCount = board.getLegalPackedMoves(Board.BLACK, moveBuffer);
+        SearchUndo primaryUndo = board.evaluationPrimaryUndo();
+        SearchUndo replyUndo = board.evaluationReplyUndo();
+
+        for (int i = 0; i < blackMoveCount; i++) {
+            int blackMove = moveBuffer[i];
+            int from = PackedMove.from(blackMove);
+            if (board.getPiece(BitBoard169.row(from), BitBoard169.col(from)) != Board.KING) continue;
+            int target = PackedMove.to(blackMove);
+            if (!isEdgeSquare(BitBoard169.row(target), BitBoard169.col(target))) continue;
+
+            board.makeMovePacked(blackMove, primaryUndo);
+            boolean forced = board.getWinner() == Board.BLACK;
+            if (!forced && canKingWinInOneMove()) {
+                int redMoveCount = board.getLegalPackedMoves(Board.RED, replyBuffer);
+                boolean canStop = false;
+                int stopsForThisThreat = 0;
+                for (int reply = 0; reply < redMoveCount; reply++) {
+                    int redMove = replyBuffer[reply];
+                    board.makeMovePacked(redMove, replyUndo);
+                    boolean stops = board.getWinner() == Board.RED || !canKingWinInOneMove();
+                    board.unmakeMovePacked(redMove, replyUndo);
+                    if (stops) {
+                        canStop = true;
+                        stopsForThisThreat++;
+                    }
+                }
+                forced = !canStop;
+                stoppingReplies += Math.min(8, stopsForThisThreat);
+            }
+            board.unmakeMovePacked(blackMove, primaryUndo);
+            if (forced) forcedEscapes++;
+        }
+
+        int escapeScore = forcedEscapes * 70_000;
+        int interceptionScore = stoppingReplies * 500;
+        return new TacticalEscapeMetrics(-escapeScore, interceptionScore,
+                escapeScore, -interceptionScore);
+    }
+
+    private record RouteMetrics(int redMeanDistance, int redDistanceVariance,
+                                int blackMeanDistance, int blackDistanceVariance) {}
+
+    private record TacticalEscapeMetrics(int redUnblockableEscapePenalty, int redInterceptionMobility,
+                                          int blackUnblockableEscapeBonus, int blackInterceptionMobility) {
+        static final TacticalEscapeMetrics NONE = new TacticalEscapeMetrics(0, 0, 0, 0);
+    }
+
+    private boolean isEdgeSquare(int row, int col) {
+        return row == 0 || row == Board.BOARD_SIZE - 1 || col == 0 || col == Board.BOARD_SIZE - 1;
     }
 
     private int evaluateMaterialForRed() {
@@ -126,14 +253,15 @@ class BoardEvaluator {
     }
 
     private int evaluateMobility(int player) {
-        return board.getLegalMoves(player).size() * 2;
+        return board.getLegalPackedMoves(player, moveBuffer) * 2;
     }
 
     private int evaluateCapturePotential(int player) {
         int score = 0;
 
-        for (Move move : board.getLegalMoves(player)) {
-            int captured = board.countCapturesIfMove(move);
+        int count = board.getLegalPackedMoves(player, moveBuffer);
+        for (int i = 0; i < count; i++) {
+            int captured = board.countCapturesIfPacked(moveBuffer[i]);
 
             if (captured > 0) {
                 score += captured * 500;
