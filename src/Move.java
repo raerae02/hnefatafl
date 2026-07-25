@@ -8,12 +8,24 @@ public class Move {
         this.toCol = toCol;
     }
 
-    static Move parse(String s) {
-        s = s.replace(" ", "").trim();
-        String[] parts = s.split("-");
-        int[] from = parseSquare(parts[0]);
-        int[] to = parseSquare(parts[1]);
-        return new Move(from[0], from[1], to[0], to[1]);
+    // Convertit un texte comme "G7-H7" en Move.
+    // Retourne null si le coup est invalide (ex. "A0-A0" envoye par le serveur).
+    static Move tryParse(String s) {
+        try {
+            s = s.replace(" ", "").trim();
+            String[] parts = s.split("-");
+            int[] from = parseSquare(parts[0]);
+            int[] to = parseSquare(parts[1]);
+            Move move = new Move(from[0], from[1], to[0], to[1]);
+
+            if (move.fromRow < 0 || move.fromRow > 12 || move.fromCol < 0 || move.fromCol > 12
+                    || move.toRow < 0 || move.toRow > 12 || move.toCol < 0 || move.toCol > 12) {
+                return null;
+            }
+            return move;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     static int[] parseSquare(String sq){

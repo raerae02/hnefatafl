@@ -166,7 +166,7 @@ public class Main {
         g[5][5] = Board.RED;
 
         Board b = new Board(g);
-        Move bestMove = b.getBestMove(Board.BLACK, 1);
+        Move bestMove = b.getBestMoveTimed(Board.BLACK, 100, null);
         boolean ok = bestMove != null && bestMove.toRow == 0 && bestMove.toCol == 0;
 
         System.out.println(ok ? "PASS : roi va au coin" : "FAIL : meilleur coup inattendu");

@@ -1,10 +1,11 @@
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 class Board {
     private static final int[][] DIRECTIONS = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
     private int kingRow, kingCol;
-    private static final int DEFAULT_SEARCH_DEPTH = 2;
     private static final int WIN_SCORE = 100000;
     static final int EMPTY = 0, BLACK = 2, RED = 4, KING = 5;
     int[][] grid;
@@ -59,6 +60,9 @@ class Board {
     private boolean shouldCapture(int row, int col, int piece) {
         if (!inBounds(row, col)) return false;
 
+        // le trone est hostile meme quand le roi est dessus (comportement du serveur)
+        if (isThrone(row, col)) return true;
+
         int otherSide = grid[row][col];
         return sameTeam(otherSide, piece) || (otherSide == EMPTY && isHostileSquare(row, col));
     }
@@ -66,48 +70,166 @@ class Board {
     // tous les coups valides pour rouge ou noir
     public List<Move> getLegalMoves(int player) {
         List<Move> moves = new ArrayList<>();
+        scanMoves(player, moves);
+        return moves;
+    }
+
+    // nombre de coups valides, sans creer d'objets (pour la mobilite dans evaluate)
+    private int countMoves(int player) {
+        return scanMoves(player, null);
+    }
+
+    /*
+     * Parcours commun : suit les 4 rayons de chaque piece du joueur (mouvement
+     * de tour) et retourne le nombre de coups valides. Si collector n'est pas
+     * null, chaque coup y est aussi ajoute. Le mode "comptage seul" evite de
+     * creer des milliers d'objets Move dans evaluate, appelee a chaque feuille
+     * de la recherche.
+     */
+    private int scanMoves(int player, List<Move> collector) {
+        int count = 0;
         for (int fromRow = 0; fromRow < 13; fromRow++) {
             for (int fromCol = 0; fromCol < 13; fromCol++) {
                 int piece = grid[fromRow][fromCol];
                 boolean isMyPiece = (isAttacker(player)) ? (piece == RED) : (piece == BLACK || piece == KING);
                 if(!isMyPiece) continue;
-                for (int toCol = 0; toCol < 13; toCol++) {
-                    Move move = new Move(fromRow, fromCol, fromRow, toCol);
-                    if (isValidMove(move)) moves.add(move);
-                }
-                for (int toRow = 0; toRow < 13; toRow++) {
-                    Move move = new Move(fromRow, fromCol, toRow, fromCol);
-                    if (isValidMove(move)) moves.add(move);
+                for (int[] direction : DIRECTIONS) {
+                    int toRow = fromRow + direction[0];
+                    int toCol = fromCol + direction[1];
+                    while (inBounds(toRow, toCol) && grid[toRow][toCol] == EMPTY) {
+                        // seulement le roi peut s'arreter sur le trone ou dans un coin
+                        if (piece == KING || !isHostileSquare(toRow, toCol)) {
+                            count++;
+                            if (collector != null) collector.add(new Move(fromRow, fromCol, toRow, toCol));
+                        }
+                        toRow += direction[0];
+                        toCol += direction[1];
+                    }
                 }
             }
         }
-        return moves;
+        return count;
     }
 
-    public int miniMax(Board board){
-        return board.minimax(DEFAULT_SEARCH_DEPTH, RED, RED);
-    }
+    private static long searchDeadline = Long.MAX_VALUE;
+    public static int lastSearchDepth = 0;
 
-    public Move getBestMove(int player, int depth) {
+    /*
+     * Approfondissement iteratif : cherche a profondeur 2, puis 3, puis 4...
+     * tant qu'il reste du temps. On garde le coup de la derniere profondeur
+     * COMPLETEE (une recherche interrompue est jetee). La profondeur 2 est
+     * toujours terminee pour garantir un coup valable.
+     *
+     * A chaque iteration, les coups sont essayes dans l'ordre des scores de
+     * l'iteration precedente : commencer par les meilleurs resserre la fenetre
+     * alpha tres tot, ce qui fait couper l'alpha-beta beaucoup plus vite et
+     * permet d'atteindre des profondeurs superieures dans le meme budget.
+     */
+    public Move getBestMoveTimed(int player, long timeBudgetMs, Map<String, Integer> positionHistory) {
+        long deadline = System.currentTimeMillis() + timeBudgetMs;
+
         List<Move> moves = getLegalMoves(player);
         if (moves.isEmpty()) return null;
 
+        Map<String, Integer> previousScores = new HashMap<>();
         Move bestMove = null;
-        int bestScore = Integer.MIN_VALUE;
+        lastSearchDepth = 0;
 
-        for (Move move : moves) {
-            Board nextBoard = copy();
-            nextBoard.applyMove(move);
-            int score = nextBoard.alphaBeta(depth - 1, opponent(player), player,
-                    Integer.MIN_VALUE, Integer.MAX_VALUE);
+        for (int depth = 2; depth <= 12; depth++) {
+            searchDeadline = (depth == 2) ? Long.MAX_VALUE : deadline;
+            try {
+                if (!previousScores.isEmpty()) {
+                    Map<String, Integer> order = previousScores;
+                    moves.sort((a, b) -> Integer.compare(
+                            order.getOrDefault(b.toString(), Integer.MIN_VALUE),
+                            order.getOrDefault(a.toString(), Integer.MIN_VALUE)));
+                }
 
-            if (bestMove == null || score > bestScore) {
-                bestScore = score;
-                bestMove = move;
+                Move iterationBest = null;
+                int iterationBestScore = Integer.MIN_VALUE;
+                int alpha = Integer.MIN_VALUE;
+                Map<String, Integer> scores = new HashMap<>();
+
+                for (Move move : moves) {
+                    Board nextBoard = copy();
+                    nextBoard.applyMove(move);
+                    int score = nextBoard.alphaBeta(depth - 1, opponent(player), player,
+                            alpha, Integer.MAX_VALUE);
+
+                    if (positionHistory != null) {
+                        Integer timesSeen = positionHistory.get(nextBoard.positionKey());
+                        if (timesSeen != null) score -= timesSeen * 500;
+                    }
+
+                    scores.put(move.toString(), score);
+                    if (iterationBest == null || score > iterationBestScore) {
+                        iterationBest = move;
+                        iterationBestScore = score;
+                    }
+                    // borne prudente : le score penalise est toujours <= au score brut
+                    alpha = Math.max(alpha, score);
+                }
+
+                bestMove = iterationBest;
+                lastSearchDepth = depth;
+                previousScores = scores;
+            } catch (SearchTimeout e) {
+                break;
+            } finally {
+                searchDeadline = Long.MAX_VALUE;
             }
         }
 
         return bestMove;
+    }
+
+    /*
+     * Ordonne les coups pour l'alpha-beta : captures d'abord, puis coups du roi,
+     * puis le reste. Essayer les coups forts en premier resserre alpha/beta tot
+     * et fait couper la recherche beaucoup plus vite, donc on va plus profond.
+     */
+    private List<Move> orderMoves(List<Move> moves) {
+        List<Move> ordered = new ArrayList<>(moves.size());
+        List<Move> kingMoves = new ArrayList<>();
+        List<Move> quiet = new ArrayList<>(moves.size());
+
+        for (Move move : moves) {
+            if (isCapturingMove(move)) ordered.add(move);
+            else if (grid[move.fromRow][move.fromCol] == KING) kingMoves.add(move);
+            else quiet.add(move);
+        }
+
+        ordered.addAll(kingMoves);
+        ordered.addAll(quiet);
+        return ordered;
+    }
+
+    // Estimation rapide (sans jouer le coup) : ce coup capture-t-il une piece ?
+    private boolean isCapturingMove(Move move) {
+        int piece = grid[move.fromRow][move.fromCol];
+        for (int[] direction : DIRECTIONS) {
+            int victimRow = move.toRow + direction[0];
+            int victimCol = move.toCol + direction[1];
+            if (!inBounds(victimRow, victimCol)) continue;
+
+            int victim = grid[victimRow][victimCol];
+            if (victim != EMPTY && victim != KING && !sameTeam(victim, piece)
+                    && shouldCapture(move.toRow + 2 * direction[0], move.toCol + 2 * direction[1], piece)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Signature compacte de la position, utilisee pour detecter les repetitions.
+    public String positionKey() {
+        StringBuilder key = new StringBuilder(169);
+        for (int row = 0; row < 13; row++) {
+            for (int col = 0; col < 13; col++) {
+                key.append((char) ('0' + grid[row][col]));
+            }
+        }
+        return key.toString();
     }
 
     /*
@@ -173,9 +295,10 @@ class Board {
      * ne peut pas produire un meilleur choix que ce qui a deja ete trouve.
      */
     private int alphaBeta(int depth, int player, int playerToHelp, int alpha, int beta) {
+        if (System.currentTimeMillis() > searchDeadline) throw new SearchTimeout();
         if (depth == 0 || isTerminal()) return evaluate(playerToHelp);
 
-        List<Move> moves = getLegalMoves(player);
+        List<Move> moves = orderMoves(getLegalMoves(player));
         if (moves.isEmpty()) return evaluate(playerToHelp);
 
         if (player == playerToHelp) {
@@ -226,18 +349,27 @@ class Board {
 
         int redPieces = 0;
         int blackPieces = 0;
+        int kingPressure = 0;
 
         for (int row = 0; row < 13; row++) {
             for (int col = 0; col < 13; col++) {
-                if (grid[row][col] == RED) redPieces++;
+                if (grid[row][col] == RED) {
+                    redPieces++;
+                    // pression : plus un rouge est proche du roi, mieux c'est pour rouge
+                    kingPressure += 24 - (Math.abs(row - kingRow) + Math.abs(col - kingCol));
+                }
                 if (grid[row][col] == BLACK) blackPieces++;
             }
         }
 
         int material = (blackPieces * 100) - (redPieces * 80);
-        int mobility = (getLegalMoves(BLACK).size() - getLegalMoves(RED).size()) * 2;
-        int kingSafety = kingEscapeScore();
-        int defenderScore = material + mobility + kingSafety;
+        int mobility = (countMoves(BLACK) - countMoves(RED)) * 2;
+
+        // poids asymetrique : le rouge valorise fortement fermer les cotes du roi,
+        // le noir garde un roi audacieux qui fonce vers les coins
+        int blockerWeight = isDefender(player) ? 30 : 60;
+        int kingSafety = kingEscapeScore(blockerWeight);
+        int defenderScore = material + mobility + kingSafety - (kingPressure * 2);
 
         return isDefender(player) ? defenderScore : -defenderScore;
     }
@@ -277,7 +409,8 @@ class Board {
         System.out.println("    A B C D E F G H I J K L M");
     }
 
-    private boolean isValidMove(Move move){
+    // Verifie la validite d'un coup (exigence de l'enonce pour les coups adverses).
+    boolean isValidMove(Move move){
         int piece = grid[move.fromRow][move.fromCol];
 
         if(piece == EMPTY) return false;
@@ -352,38 +485,60 @@ class Board {
         return isAttacker(player) ? BLACK : RED;
     }
 
-    private int kingEscapeScore() {
+    private int kingEscapeScore(int blockerWeight) {
+        // roi colle a un coin libre : victoire noire imparable au prochain coup
+        // (personne ne peut occuper le coin, s'interposer ou capturer le roi a temps)
+        if (isCorner(kingRow - 1, kingCol) || isCorner(kingRow + 1, kingCol)
+                || isCorner(kingRow, kingCol - 1) || isCorner(kingRow, kingCol + 1)) {
+            return 50000;
+        }
+
+        int openCornerLines = 0;
+        if (hasOpenCornerLine(0, -1)) openCornerLines++;
+        if (hasOpenCornerLine(0, 1)) openCornerLines++;
+        if (hasOpenCornerLine(-1, 0)) openCornerLines++;
+        if (hasOpenCornerLine(1, 0)) openCornerLines++;
+
+        // fourche : deux lignes ouvertes vers des coins, l'attaquant ne peut en bloquer qu'une
+        if (openCornerLines >= 2) return 40000;
+
         int closestCorner = Math.min(
                 Math.min(kingRow + kingCol, kingRow + (12 - kingCol)),
                 Math.min((12 - kingRow) + kingCol, (12 - kingRow) + (12 - kingCol))
         );
 
         int score = (24 - closestCorner) * 10;
-        score += openKingLineScore(0, -1);
-        score += openKingLineScore(0, 1);
-        score += openKingLineScore(-1, 0);
-        score += openKingLineScore(1, 0);
+        score += openCornerLines * 250;
 
         int blockers = 0;
-        if (isBlockedForKing(kingRow - 1, kingCol)) blockers++;
-        if (isBlockedForKing(kingRow + 1, kingCol)) blockers++;
-        if (isBlockedForKing(kingRow, kingCol - 1)) blockers++;
-        if (isBlockedForKing(kingRow, kingCol + 1)) blockers++;
+        if (isEvalBlocker(kingRow - 1, kingCol)) blockers++;
+        if (isEvalBlocker(kingRow + 1, kingCol)) blockers++;
+        if (isEvalBlocker(kingRow, kingCol - 1)) blockers++;
+        if (isEvalBlocker(kingRow, kingCol + 1)) blockers++;
 
-        return score - (blockers * 30);
+        // fermer un cote du roi vaut plus qu'un pion : c'est le chemin vers la capture
+        return score - (blockers * blockerWeight);
     }
 
-    private int openKingLineScore(int rowDirection, int colDirection) {
+    // Pour l'evaluation : seuls un pion rouge ou le trone comptent comme bloqueurs.
+    // Les bords restent capturants dans getWinner, mais les penaliser ici
+    // decouragerait le roi d'utiliser les bords pour atteindre les coins.
+    private boolean isEvalBlocker(int row, int col) {
+        return inBounds(row, col) && (grid[row][col] == RED || isThrone(row, col));
+    }
+
+    // vrai si le roi a une ligne degagee jusqu'a un coin dans cette direction
+    private boolean hasOpenCornerLine(int rowDirection, int colDirection) {
         int row = kingRow + rowDirection;
         int col = kingCol + colDirection;
 
         while (inBounds(row, col)) {
-            if (grid[row][col] != EMPTY) return 0;
-            if (isCorner(row, col)) return 250;
+            if (isCorner(row, col)) return true;
+            if (grid[row][col] != EMPTY) return false;
             row += rowDirection;
             col += colDirection;
         }
 
-        return 0;
+        return false;
     }
 }
