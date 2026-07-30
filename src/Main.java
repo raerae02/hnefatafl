@@ -1,3 +1,6 @@
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 public class Main {
     public static void main(String[] args) {
         test1_captureSimple();
@@ -12,6 +15,9 @@ public class Main {
         test10_iaPrendVictoireImmediate();
         test11_rechercheRestaurePlateau();
         test12_timeoutRestaurePlateau();
+        test13_tableTranspositionReutilisee();
+        test14_rechercheParallelePrendVictoire();
+        test15_ponderingSarreteProprement();
     }
 
     static void test1_captureSimple() {
@@ -216,5 +222,86 @@ public class Main {
                 && initialEvaluation == b.evaluate(Board.RED);
         System.out.println(ok ? "PASS : plateau restaure apres timeout"
                 : "FAIL : le timeout a laisse un coup simule");
+    }
+
+    static void test13_tableTranspositionReutilisee() {
+        System.out.println("Test 13 : table de transposition reutilisee");
+        int[][] g = new int[13][13];
+        g[0][5] = Board.KING;
+        g[5][5] = Board.RED;
+
+        Board b = new Board(g);
+        TranspositionTable table = new TranspositionTable(12);
+
+        SearchContext firstContext = SearchContext.timed(
+                Board.BLACK, 50, table, null, false);
+        SearchResult first = b.searchBestMove(Board.BLACK, null, firstContext);
+
+        SearchContext secondContext = SearchContext.timed(
+                Board.BLACK, 50, table, null, false);
+        SearchResult second = b.searchBestMove(Board.BLACK, null, secondContext);
+
+        boolean ok = first.bestMove != null
+                && first.bestMove.equals(second.bestMove)
+                && first.bestScore == second.bestScore
+                && second.tableHits > 0;
+        System.out.println(ok ? "PASS : resultats reutilises"
+                : "FAIL : table non reutilisee ou resultat different");
+    }
+
+    static void test14_rechercheParallelePrendVictoire() {
+        System.out.println("Test 14 : recherche parallele choisit la victoire");
+        int[][] g = new int[13][13];
+        g[0][5] = Board.KING;
+        g[5][5] = Board.RED;
+
+        Board b = new Board(g);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            SearchContext context = SearchContext.timed(
+                    Board.BLACK, 100, new TranspositionTable(12), executor, true);
+            SearchResult result = b.searchBestMove(Board.BLACK, null, context);
+            boolean ok = result.bestMove != null
+                    && result.bestMove.toRow == 0
+                    && (result.bestMove.toCol == 0 || result.bestMove.toCol == 12);
+            System.out.println(ok ? "PASS : victoire trouvee en parallele"
+                    : "FAIL : meilleur coup parallele inattendu");
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    static void test15_ponderingSarreteProprement() {
+        System.out.println("Test 15 : pondering interruptible");
+        int[][] g = new int[13][13];
+        g[6][6] = Board.KING;
+        g[6][4] = Board.BLACK;
+        g[4][6] = Board.BLACK;
+        g[6][2] = Board.RED;
+        g[2][6] = Board.RED;
+
+        Board b = new Board(g);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        SearchContext context = SearchContext.pondering(
+                Board.RED, new TranspositionTable(12), executor, true);
+        Thread pondering = new Thread(
+                () -> b.searchBestMove(Board.BLACK, null, context));
+
+        try {
+            pondering.start();
+            Thread.sleep(25);
+            context.requestStop();
+            pondering.interrupt();
+            pondering.join(1000);
+            System.out.println(!pondering.isAlive()
+                    ? "PASS : pondering arrete"
+                    : "FAIL : pondering toujours actif");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.out.println("FAIL : test interrompu");
+        } finally {
+            context.requestStop();
+            executor.shutdownNow();
+        }
     }
 }

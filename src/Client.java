@@ -6,10 +6,16 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 class Client {
     private static final long TIME_BUDGET_MS = 4000;   // marge sur les 5 s du serveur
     private static final int MAX_REJECTED_MOVES = 8;
+    private static final int SEARCH_THREADS = Math.max(
+            1, Math.min(4, Runtime.getRuntime().availableProcessors() - 1));
 
     public static void main(String[] args) {
         Board board = null;
@@ -18,9 +24,11 @@ class Client {
         Move lastSentMove = null;
         List<String> rejectedMoves = new ArrayList<>();
         Map<String, Integer> positionHistory = new HashMap<>();
+        TranspositionTable transpositionTable = new TranspositionTable();
+        ExecutorService rootExecutor = createSearchExecutor();
+        PonderWorker pondering = null;
 
-        try {
-            Socket myClient = connectWithRetry("localhost", 8888, 120);
+        try (Socket myClient = connectWithRetry("localhost", 8888, 120)) {
             BufferedInputStream input = new BufferedInputStream(myClient.getInputStream());
             BufferedOutputStream output = new BufferedOutputStream(myClient.getOutputStream());
 
@@ -28,19 +36,29 @@ class Client {
                 char cmd = (char)input.read();
                 System.out.println(cmd);
 
+                if (pondering != null) {
+                    pondering.stopAndWait();
+                    pondering = null;
+                }
+
                 if (cmd == '1') {
                     myPlayer = Board.RED;
                     board = readInitialBoard(input);
                     positionHistory.clear();
+                    transpositionTable.clear();
                     System.out.println("Nouvelle partie comme joueur blanc.");
 
-                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory);
+                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory,
+                            transpositionTable, rootExecutor);
                     boardBeforeLastMove = board.copy();
                     lastSentMove = move;
                     rejectedMoves.clear();
                     sendMove(output, move);
                     board.applyMove(move);
                     recordPosition(board, positionHistory);
+                    pondering = PonderWorker.start(
+                            board, opponentOf(myPlayer), myPlayer,
+                            transpositionTable, rootExecutor);
                 }
 
                 if (cmd == '2') {
@@ -48,7 +66,11 @@ class Client {
                     board = readInitialBoard(input);
                     lastSentMove = null;
                     positionHistory.clear();
+                    transpositionTable.clear();
                     System.out.println("Nouvelle partie comme joueur noir, attente du premier coup adverse.");
+                    pondering = PonderWorker.start(
+                            board, opponentOf(myPlayer), myPlayer,
+                            transpositionTable, rootExecutor);
                 }
 
                 if (cmd == '3') {
@@ -60,6 +82,9 @@ class Client {
                     // Coup bidon (ex. "A0-A0") alors qu'on a deja envoye notre coup :
                     // le serveur nous invite juste a jouer, mais c'est deja fait.
                     if (opponentMove == null && lastSentMove != null) {
+                        pondering = PonderWorker.start(
+                                board, opponentOf(myPlayer), myPlayer,
+                                transpositionTable, rootExecutor);
                         continue;
                     }
 
@@ -73,13 +98,17 @@ class Client {
                         }
                     }
 
-                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory);
+                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory,
+                            transpositionTable, rootExecutor);
                     boardBeforeLastMove = board.copy();
                     lastSentMove = move;
                     rejectedMoves.clear();
                     sendMove(output, move);
                     board.applyMove(move);
                     recordPosition(board, positionHistory);
+                    pondering = PonderWorker.start(
+                            board, opponentOf(myPlayer), myPlayer,
+                            transpositionTable, rootExecutor);
                 }
 
                 if (cmd == '4') {
@@ -96,12 +125,16 @@ class Client {
                         rejectedMoves.add(lastSentMove.toString());
                     }
 
-                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory);
+                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory,
+                            transpositionTable, rootExecutor);
                     boardBeforeLastMove = board.copy();
                     lastSentMove = move;
                     sendMove(output, move);
                     board.applyMove(move);
                     recordPosition(board, positionHistory);
+                    pondering = PonderWorker.start(
+                            board, opponentOf(myPlayer), myPlayer,
+                            transpositionTable, rootExecutor);
                 }
 
                 if (cmd == '5') {
@@ -114,11 +147,29 @@ class Client {
                     break;
                 }
             }
-
-            myClient.close();
         } catch (IOException e) {
             System.out.println(e);
+        } finally {
+            if (pondering != null) {
+                pondering.stopAndWait();
+            }
+            rootExecutor.shutdownNow();
+            try {
+                rootExecutor.awaitTermination(1, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
+    }
+
+    private static ExecutorService createSearchExecutor() {
+        AtomicInteger threadNumber = new AtomicInteger();
+        return Executors.newFixedThreadPool(SEARCH_THREADS, task -> {
+            Thread thread = new Thread(
+                    task, "hnefatafl-search-" + threadNumber.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        });
     }
 
     // Reessaie la connexion tant que le serveur n'a pas demarre la partie.
@@ -209,10 +260,21 @@ class Client {
         positionHistory.merge(board.positionKey(), 1, Integer::sum);
     }
 
-    private static Move chooseMove(Board board, int player, List<String> rejectedMoves,
-                                   Map<String, Integer> positionHistory) {
-        Move bestMove = board.getBestMoveTimed(player, TIME_BUDGET_MS, positionHistory);
-        System.out.println("(profondeur atteinte : " + Board.lastSearchDepth + ")");
+    private static Move chooseMove(
+            Board board, int player, List<String> rejectedMoves,
+            Map<String, Integer> positionHistory,
+            TranspositionTable transpositionTable,
+            ExecutorService rootExecutor) {
+        SearchContext context = SearchContext.timed(
+                player, TIME_BUDGET_MS, transpositionTable, rootExecutor, true);
+        SearchResult result = board.searchBestMove(player, positionHistory, context);
+        Move bestMove = result.bestMove;
+
+        System.out.printf(
+                "(profondeur : %d, noeuds : %d, feuilles : %d, hits TT : %d, temps : %d ms)%n",
+                result.completedDepth, result.visitedNodes, result.evaluatedLeaves,
+                result.tableHits, result.elapsedMillis);
+
         if (bestMove != null && !rejectedMoves.contains(bestMove.toString())) {
             return bestMove;
         }
@@ -226,10 +288,57 @@ class Client {
         throw new IllegalStateException("Aucun coup legal disponible.");
     }
 
+    private static int opponentOf(int player) {
+        return player == Board.RED ? Board.BLACK : Board.RED;
+    }
+
     private static void sendMove(BufferedOutputStream output, Move move) throws IOException {
         String moveText = move.toString();
         System.out.println("Coup joue : " + moveText);
         output.write(moveText.getBytes(), 0, moveText.length());
         output.flush();
+    }
+
+    /*
+     * Recherche en arriere-plan pendant que le thread principal attend le
+     * prochain message du serveur. Le plateau est copie une seule fois au
+     * demarrage; toute la recherche interne utilise ensuite make/unmake.
+     */
+    private static final class PonderWorker {
+        private final SearchContext context;
+        private final Thread thread;
+
+        private PonderWorker(SearchContext context, Thread thread) {
+            this.context = context;
+            this.thread = thread;
+        }
+
+        static PonderWorker start(
+                Board currentBoard, int sideToMove, int playerToHelp,
+                TranspositionTable transpositionTable,
+                ExecutorService rootExecutor) {
+            Board ponderingBoard = currentBoard.copy();
+            SearchContext context = SearchContext.pondering(
+                    playerToHelp, transpositionTable, rootExecutor, true);
+
+            Thread thread = new Thread(
+                    () -> ponderingBoard.searchBestMove(sideToMove, null, context),
+                    "hnefatafl-ponder");
+            thread.setDaemon(true);
+
+            PonderWorker worker = new PonderWorker(context, thread);
+            thread.start();
+            return worker;
+        }
+
+        void stopAndWait() {
+            context.requestStop();
+            thread.interrupt();
+            try {
+                thread.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 }

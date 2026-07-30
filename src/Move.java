@@ -1,5 +1,5 @@
 public class Move {
-    int fromRow, fromCol, toRow, toCol;
+    final int fromRow, fromCol, toRow, toCol;
 
     Move(int fromRow, int fromCol, int toRow, int toCol) {
         this.fromRow = fromRow;
@@ -44,5 +44,26 @@ public class Move {
 
     public String toString() {
         return toSquare(fromRow, fromCol) + "-" + toSquare(toRow, toCol);
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) return true;
+        if (!(other instanceof Move)) return false;
+
+        Move move = (Move) other;
+        return fromRow == move.fromRow
+                && fromCol == move.fromCol
+                && toRow == move.toRow
+                && toCol == move.toCol;
+    }
+
+    @Override
+    public int hashCode() {
+        int result = fromRow;
+        result = 31 * result + fromCol;
+        result = 31 * result + toRow;
+        result = 31 * result + toCol;
+        return result;
     }
 }

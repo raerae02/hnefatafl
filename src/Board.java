@@ -2,24 +2,59 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.SplittableRandom;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 class Board {
-    private static final int[][] DIRECTIONS = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
-    private int kingRow, kingCol;
+    private static final int BOARD_SIZE = 13;
+    private static final int SQUARE_COUNT = BOARD_SIZE * BOARD_SIZE;
     private static final int WIN_SCORE = 100000;
     static final int EMPTY = 0, BLACK = 2, RED = 4, KING = 5;
+    private static final int[][] DIRECTIONS = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+    private static final long[][] ZOBRIST_PIECES = new long[SQUARE_COUNT][6];
+    private static final long[] ZOBRIST_SIDE_TO_MOVE = new long[6];
+    private static final long[] ZOBRIST_PERSPECTIVE = new long[6];
+
+    static {
+        SplittableRandom random = new SplittableRandom(0x484E454641544146L);
+        for (int square = 0; square < SQUARE_COUNT; square++) {
+            for (int piece = 0; piece < ZOBRIST_PIECES[square].length; piece++) {
+                ZOBRIST_PIECES[square][piece] = random.nextLong();
+            }
+        }
+        ZOBRIST_SIDE_TO_MOVE[BLACK] = random.nextLong();
+        ZOBRIST_SIDE_TO_MOVE[RED] = random.nextLong();
+        ZOBRIST_PERSPECTIVE[BLACK] = random.nextLong();
+        ZOBRIST_PERSPECTIVE[RED] = random.nextLong();
+    }
+
+    private int kingRow, kingCol;
     int[][] grid;
+    private long zobristPiecesHash;
 
     public Board(int[][] grid){
         this.grid = grid;
-        for (int row = 0; row < 13; row++) {
-            for (int col = 0; col < 13; col++) {
-                if(grid[row][col] == KING){
+        for (int row = 0; row < BOARD_SIZE; row++) {
+            for (int col = 0; col < BOARD_SIZE; col++) {
+                int piece = grid[row][col];
+                if (piece != EMPTY) {
+                    zobristPiecesHash ^= zobristPiece(row, col, piece);
+                }
+                if(piece == KING){
                     kingRow = row;
                     kingCol = col;
                 }
             }
         }
+    }
+
+    private Board(int[][] grid, int kingRow, int kingCol, long zobristPiecesHash) {
+        this.grid = grid;
+        this.kingRow = kingRow;
+        this.kingCol = kingCol;
+        this.zobristPiecesHash = zobristPiecesHash;
     }
 
     // Deplace une piece et verifie les captures autour.
@@ -34,11 +69,15 @@ class Board {
      * restaurer le plateau sans creer une copie complete pour chaque enfant.
      */
     private int makeMove(Move move, int piece) {
+        zobristPiecesHash ^= zobristPiece(move.fromRow, move.fromCol, piece);
+        zobristPiecesHash ^= zobristPiece(move.toRow, move.toCol, piece);
         movePiece(move, piece);
         return captureAround(move.toRow, move.toCol, piece);
     }
 
     private void unmakeMove(Move move, int piece, int captureMask) {
+        zobristPiecesHash ^= zobristPiece(move.toRow, move.toCol, piece);
+        zobristPiecesHash ^= zobristPiece(move.fromRow, move.fromCol, piece);
         grid[move.fromRow][move.fromCol] = piece;
         grid[move.toRow][move.toCol] = EMPTY;
 
@@ -55,6 +94,7 @@ class Board {
             int capturedRow = move.toRow + direction[0];
             int capturedCol = move.toCol + direction[1];
             grid[capturedRow][capturedCol] = capturedPiece;
+            zobristPiecesHash ^= zobristPiece(capturedRow, capturedCol, capturedPiece);
         }
     }
 
@@ -84,6 +124,7 @@ class Board {
             if (victim != EMPTY && !sameTeam(victim, piece) && victim != KING
                     && shouldCapture(otherSideRow, otherSideCol, piece)) {
                 grid[victimRow][victimCol] = EMPTY;
+                zobristPiecesHash ^= zobristPiece(victimRow, victimCol, victim);
                 captureMask |= 1 << directionIndex;
             }
         }
@@ -145,9 +186,6 @@ class Board {
         return count;
     }
 
-    private static long searchDeadline = Long.MAX_VALUE;
-    public static int lastSearchDepth = 0;
-
     /*
      * Approfondissement iteratif : cherche a profondeur 2, puis 3, puis 4...
      * tant qu'il reste du temps. On garde le coup de la derniere profondeur
@@ -160,66 +198,221 @@ class Board {
      * permet d'atteindre des profondeurs superieures dans le meme budget.
      */
     public Move getBestMoveTimed(int player, long timeBudgetMs, Map<String, Integer> positionHistory) {
-        long deadline = System.currentTimeMillis() + timeBudgetMs;
+        TranspositionTable table = new TranspositionTable();
+        SearchContext context = SearchContext.timed(
+                player, timeBudgetMs, table, null, false);
+        return searchBestMove(player, positionHistory, context).bestMove;
+    }
 
-        List<Move> moves = getLegalMoves(player);
-        if (moves.isEmpty()) return null;
+    /*
+     * Version generale utilisee par le client et par le pondering.
+     * sideToMove est le joueur qui doit jouer a la racine, tandis que
+     * context.playerToHelp() reste toujours le camp de notre intelligence.
+     */
+    SearchResult searchBestMove(int sideToMove, Map<String, Integer> positionHistory,
+                                SearchContext context) {
+        List<Move> moves = orderMoves(getLegalMoves(sideToMove), null);
+        if (moves.isEmpty()) {
+            return new SearchResult(null, evaluate(context.playerToHelp()), 0, context);
+        }
 
-        Map<String, Integer> previousScores = new HashMap<>();
-        Move bestMove = null;
-        lastSearchDepth = 0;
+        boolean maximizingRoot = sideToMove == context.playerToHelp();
+        Map<Move, Integer> previousScores = new HashMap<>();
+        Move bestMove = moves.get(0);
+        int bestScore = evaluate(context.playerToHelp());
+        int completedDepth = 0;
 
         for (int depth = 2; depth <= 12; depth++) {
-            searchDeadline = (depth == 2) ? Long.MAX_VALUE : deadline;
+            context.beginIteration(depth);
             try {
-                if (!previousScores.isEmpty()) {
-                    Map<String, Integer> order = previousScores;
-                    moves.sort((a, b) -> Integer.compare(
-                            order.getOrDefault(b.toString(), Integer.MIN_VALUE),
-                            order.getOrDefault(a.toString(), Integer.MIN_VALUE)));
+                orderRootMoves(moves, previousScores, sideToMove,
+                        maximizingRoot, context);
+
+                RootIterationResult iteration = context.usesParallelRoot() && moves.size() > 1
+                        ? searchRootParallel(moves, depth, sideToMove, positionHistory,
+                                maximizingRoot, context)
+                        : searchRootSequential(moves, depth, sideToMove, positionHistory,
+                                maximizingRoot, context);
+
+                bestMove = iteration.bestMove;
+                bestScore = iteration.bestScore;
+                completedDepth = depth;
+                previousScores = iteration.scores;
+
+                // L'historique de repetitions est applique uniquement a la racine.
+                // Une valeur qui en depend ne doit pas etre reutilisee comme score exact.
+                if (positionHistory == null) {
+                    long rootKey = zobristKey(sideToMove, context.playerToHelp());
+                    context.table().store(rootKey, depth, bestScore,
+                            TranspositionTable.Bound.EXACT, bestMove,
+                            context.tableGeneration());
                 }
-
-                Move iterationBest = null;
-                int iterationBestScore = Integer.MIN_VALUE;
-                int alpha = Integer.MIN_VALUE;
-                Map<String, Integer> scores = new HashMap<>();
-
-                for (Move move : moves) {
-                    int piece = grid[move.fromRow][move.fromCol];
-                    int captureMask = makeMove(move, piece);
-                    int score;
-                    try {
-                        score = alphaBeta(depth - 1, opponent(player), player,
-                                alpha, Integer.MAX_VALUE);
-
-                        if (positionHistory != null) {
-                            Integer timesSeen = positionHistory.get(positionKey());
-                            if (timesSeen != null) score -= timesSeen * 500;
-                        }
-                    } finally {
-                        unmakeMove(move, piece, captureMask);
-                    }
-
-                    scores.put(move.toString(), score);
-                    if (iterationBest == null || score > iterationBestScore) {
-                        iterationBest = move;
-                        iterationBestScore = score;
-                    }
-                    // borne prudente : le score penalise est toujours <= au score brut
-                    alpha = Math.max(alpha, score);
-                }
-
-                bestMove = iterationBest;
-                lastSearchDepth = depth;
-                previousScores = scores;
             } catch (SearchTimeout e) {
                 break;
-            } finally {
-                searchDeadline = Long.MAX_VALUE;
             }
         }
 
-        return bestMove;
+        return new SearchResult(bestMove, bestScore, completedDepth, context);
+    }
+
+    private RootIterationResult searchRootSequential(
+            List<Move> moves, int depth, int sideToMove,
+            Map<String, Integer> positionHistory, boolean maximizingRoot,
+            SearchContext context) {
+        Move iterationBest = null;
+        int iterationBestScore = maximizingRoot ? Integer.MIN_VALUE : Integer.MAX_VALUE;
+        int alpha = Integer.MIN_VALUE;
+        int beta = Integer.MAX_VALUE;
+        Map<Move, Integer> scores = new HashMap<>();
+
+        for (Move move : moves) {
+            context.checkStopped();
+            int score = evaluateRootMoveOnCurrentBoard(
+                    move, depth, sideToMove, positionHistory,
+                    maximizingRoot, alpha, beta, context);
+            scores.put(move, score);
+
+            if (isBetterScore(score, iterationBestScore, maximizingRoot)
+                    || iterationBest == null) {
+                iterationBest = move;
+                iterationBestScore = score;
+            }
+
+            if (maximizingRoot) alpha = Math.max(alpha, score);
+            else beta = Math.min(beta, score);
+        }
+
+        return new RootIterationResult(iterationBest, iterationBestScore, scores);
+    }
+
+    /*
+     * Young Brothers Wait simplifie : le premier coup, normalement le meilleur
+     * grace a l'iteration precedente ou a la table, est cherche seul. Sa valeur
+     * resserre ensuite la fenetre utilisee par les autres taches paralleles.
+     */
+    private RootIterationResult searchRootParallel(
+            List<Move> moves, int depth, int sideToMove,
+            Map<String, Integer> positionHistory, boolean maximizingRoot,
+            SearchContext context) {
+        Move firstMove = moves.get(0);
+        int firstScore = evaluateRootMoveOnCurrentBoard(
+                firstMove, depth, sideToMove, positionHistory,
+                maximizingRoot, Integer.MIN_VALUE, Integer.MAX_VALUE, context);
+
+        AtomicInteger sharedBound = new AtomicInteger(firstScore);
+        List<Future<RootMoveScore>> futures = new ArrayList<>(moves.size() - 1);
+
+        for (int index = 1; index < moves.size(); index++) {
+            Move move = moves.get(index);
+            futures.add(context.rootExecutor().submit(() -> {
+                context.checkStopped();
+
+                Board child = copy();
+                child.applyMove(move);
+                int alpha = maximizingRoot ? sharedBound.get() : Integer.MIN_VALUE;
+                int beta = maximizingRoot ? Integer.MAX_VALUE : sharedBound.get();
+                int score = child.alphaBeta(depth - 1, opponent(sideToMove),
+                        alpha, beta, context);
+                score = applyRepetitionPenalty(
+                        child, score, positionHistory, maximizingRoot);
+
+                if (maximizingRoot) {
+                    sharedBound.accumulateAndGet(score, Math::max);
+                } else {
+                    sharedBound.accumulateAndGet(score, Math::min);
+                }
+                return new RootMoveScore(move, score);
+            }));
+        }
+
+        Move iterationBest = firstMove;
+        int iterationBestScore = firstScore;
+        Map<Move, Integer> scores = new HashMap<>();
+        scores.put(firstMove, firstScore);
+
+        try {
+            for (Future<RootMoveScore> future : futures) {
+                RootMoveScore result = future.get();
+                scores.put(result.move, result.score);
+                if (isBetterScore(result.score, iterationBestScore, maximizingRoot)) {
+                    iterationBest = result.move;
+                    iterationBestScore = result.score;
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            context.requestStop();
+            cancelFutures(futures);
+            throw new SearchTimeout();
+        } catch (ExecutionException e) {
+            context.requestStop();
+            cancelFutures(futures);
+            Throwable cause = e.getCause();
+            if (cause instanceof SearchTimeout) throw (SearchTimeout) cause;
+            if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+            throw new IllegalStateException("Echec d'une tache de recherche.", cause);
+        }
+
+        return new RootIterationResult(iterationBest, iterationBestScore, scores);
+    }
+
+    private int evaluateRootMoveOnCurrentBoard(
+            Move move, int depth, int sideToMove,
+            Map<String, Integer> positionHistory, boolean maximizingRoot,
+            int alpha, int beta, SearchContext context) {
+        int piece = grid[move.fromRow][move.fromCol];
+        int captureMask = makeMove(move, piece);
+        try {
+            int score = alphaBeta(depth - 1, opponent(sideToMove),
+                    alpha, beta, context);
+            return applyRepetitionPenalty(
+                    this, score, positionHistory, maximizingRoot);
+        } finally {
+            unmakeMove(move, piece, captureMask);
+        }
+    }
+
+    private int applyRepetitionPenalty(
+            Board movedBoard, int score, Map<String, Integer> positionHistory,
+            boolean maximizingRoot) {
+        if (positionHistory == null) return score;
+
+        Integer timesSeen = positionHistory.get(movedBoard.positionKey());
+        if (timesSeen == null) return score;
+
+        int penalty = timesSeen * 500;
+        return maximizingRoot ? score - penalty : score + penalty;
+    }
+
+    private void orderRootMoves(List<Move> moves, Map<Move, Integer> previousScores,
+                                int sideToMove, boolean maximizingRoot,
+                                SearchContext context) {
+        if (!previousScores.isEmpty()) {
+            moves.sort((first, second) -> {
+                int firstScore = previousScores.getOrDefault(first, 0);
+                int secondScore = previousScores.getOrDefault(second, 0);
+                return maximizingRoot
+                        ? Integer.compare(secondScore, firstScore)
+                        : Integer.compare(firstScore, secondScore);
+            });
+        }
+
+        long rootKey = zobristKey(sideToMove, context.playerToHelp());
+        TranspositionTable.Entry rootEntry = context.table().find(rootKey);
+        if (rootEntry != null) {
+            context.recordTableHit();
+            moveToFront(moves, rootEntry.bestMove());
+        }
+    }
+
+    private boolean isBetterScore(int score, int currentBest, boolean maximizing) {
+        return maximizing ? score > currentBest : score < currentBest;
+    }
+
+    private void cancelFutures(List<? extends Future<?>> futures) {
+        for (Future<?> future : futures) {
+            future.cancel(true);
+        }
     }
 
     /*
@@ -227,20 +420,56 @@ class Board {
      * puis le reste. Essayer les coups forts en premier resserre alpha/beta tot
      * et fait couper la recherche beaucoup plus vite, donc on va plus profond.
      */
-    private List<Move> orderMoves(List<Move> moves) {
+    private List<Move> orderMoves(List<Move> moves, Move preferredMove) {
         List<Move> ordered = new ArrayList<>(moves.size());
         List<Move> kingMoves = new ArrayList<>();
         List<Move> quiet = new ArrayList<>(moves.size());
 
         for (Move move : moves) {
+            if (move.equals(preferredMove)) continue;
             if (isCapturingMove(move)) ordered.add(move);
             else if (grid[move.fromRow][move.fromCol] == KING) kingMoves.add(move);
             else quiet.add(move);
         }
 
+        if (preferredMove != null && moves.contains(preferredMove)) {
+            ordered.add(0, preferredMove);
+        }
         ordered.addAll(kingMoves);
         ordered.addAll(quiet);
         return ordered;
+    }
+
+    private void moveToFront(List<Move> moves, Move preferredMove) {
+        if (preferredMove == null) return;
+
+        int index = moves.indexOf(preferredMove);
+        if (index > 0) {
+            Move matchingMove = moves.remove(index);
+            moves.add(0, matchingMove);
+        }
+    }
+
+    private static final class RootMoveScore {
+        final Move move;
+        final int score;
+
+        RootMoveScore(Move move, int score) {
+            this.move = move;
+            this.score = score;
+        }
+    }
+
+    private static final class RootIterationResult {
+        final Move bestMove;
+        final int bestScore;
+        final Map<Move, Integer> scores;
+
+        RootIterationResult(Move bestMove, int bestScore, Map<Move, Integer> scores) {
+            this.bestMove = bestMove;
+            this.bestScore = bestScore;
+            this.scores = scores;
+        }
     }
 
     // Estimation rapide (sans jouer le coup) : ce coup capture-t-il une piece ?
@@ -323,7 +552,10 @@ class Board {
      * Elle lance alphaBeta avec les bornes les plus larges possibles.
      */
     public int minimaxAlphaBeta(int depth, int player, int playerToHelp) {
-        return alphaBeta(depth, player, playerToHelp, Integer.MIN_VALUE, Integer.MAX_VALUE);
+        TranspositionTable table = new TranspositionTable(16);
+        SearchContext context = SearchContext.pondering(
+                playerToHelp, table, null, false);
+        return alphaBeta(depth, player, Integer.MIN_VALUE, Integer.MAX_VALUE, context);
     }
 
     /*
@@ -338,45 +570,94 @@ class Board {
      * la suite. Si beta <= alpha, la branche est arretee avec break, car elle ne
      * peut pas produire un meilleur choix que ce qui a deja ete trouve.
      */
-    private int alphaBeta(int depth, int player, int playerToHelp, int alpha, int beta) {
-        if (System.currentTimeMillis() > searchDeadline) throw new SearchTimeout();
-        if (depth == 0 || isTerminal()) return evaluate(playerToHelp);
+    private int alphaBeta(int depth, int player, int alpha, int beta,
+                          SearchContext context) {
+        context.recordNode();
+        context.checkStopped();
 
-        List<Move> moves = orderMoves(getLegalMoves(player));
-        if (moves.isEmpty()) return evaluate(playerToHelp);
+        int originalAlpha = alpha;
+        int originalBeta = beta;
+        long key = zobristKey(player, context.playerToHelp());
+        TranspositionTable.Entry cached = context.table().find(key);
+        Move preferredMove = null;
 
-        if (player == playerToHelp) {
-            int bestScore = Integer.MIN_VALUE;
-            for (Move move : moves) {
-                int piece = grid[move.fromRow][move.fromCol];
-                int captureMask = makeMove(move, piece);
-                int score;
-                try {
-                    score = alphaBeta(depth - 1, opponent(player), playerToHelp, alpha, beta);
-                } finally {
-                    unmakeMove(move, piece, captureMask);
+        if (cached != null) {
+            context.recordTableHit();
+            preferredMove = cached.bestMove();
+
+            if (cached.depth >= depth) {
+                if (cached.bound == TranspositionTable.Bound.EXACT) {
+                    context.recordTableCutoff();
+                    return cached.score;
                 }
-                bestScore = Math.max(bestScore, score);
-                alpha = Math.max(alpha, bestScore);
-                if (beta <= alpha) break;
+                if (cached.bound == TranspositionTable.Bound.LOWER) {
+                    alpha = Math.max(alpha, cached.score);
+                } else {
+                    beta = Math.min(beta, cached.score);
+                }
+                if (alpha >= beta) {
+                    context.recordTableCutoff();
+                    return cached.score;
+                }
             }
-            return bestScore;
         }
 
-        int bestScore = Integer.MAX_VALUE;
+        if (depth == 0 || isTerminal()) {
+            context.recordLeaf();
+            int score = evaluate(context.playerToHelp());
+            context.table().store(key, depth, score, TranspositionTable.Bound.EXACT,
+                    null, context.tableGeneration());
+            return score;
+        }
+
+        List<Move> moves = orderMoves(getLegalMoves(player), preferredMove);
+        if (moves.isEmpty()) {
+            context.recordLeaf();
+            int score = evaluate(context.playerToHelp());
+            context.table().store(key, depth, score, TranspositionTable.Bound.EXACT,
+                    null, context.tableGeneration());
+            return score;
+        }
+
+        boolean maximizing = player == context.playerToHelp();
+        int bestScore = maximizing ? Integer.MIN_VALUE : Integer.MAX_VALUE;
+        Move bestMove = null;
+
         for (Move move : moves) {
             int piece = grid[move.fromRow][move.fromCol];
             int captureMask = makeMove(move, piece);
             int score;
             try {
-                score = alphaBeta(depth - 1, opponent(player), playerToHelp, alpha, beta);
+                score = alphaBeta(depth - 1, opponent(player), alpha, beta, context);
             } finally {
                 unmakeMove(move, piece, captureMask);
             }
-            bestScore = Math.min(bestScore, score);
-            beta = Math.min(beta, bestScore);
-            if (beta <= alpha) break;
+
+            if (bestMove == null || isBetterScore(score, bestScore, maximizing)) {
+                bestScore = score;
+                bestMove = move;
+            }
+
+            if (maximizing) alpha = Math.max(alpha, bestScore);
+            else beta = Math.min(beta, bestScore);
+
+            if (beta <= alpha) {
+                context.recordCutoff();
+                break;
+            }
         }
+
+        TranspositionTable.Bound bound;
+        if (bestScore <= originalAlpha) {
+            bound = TranspositionTable.Bound.UPPER;
+        } else if (bestScore >= originalBeta) {
+            bound = TranspositionTable.Bound.LOWER;
+        } else {
+            bound = TranspositionTable.Bound.EXACT;
+        }
+
+        context.table().store(key, depth, bestScore, bound, bestMove,
+                context.tableGeneration());
         return bestScore;
     }
 
@@ -429,11 +710,11 @@ class Board {
     }
 
     public Board copy() {
-        int[][] copiedGrid = new int[13][13];
-        for (int row = 0; row < 13; row++) {
-            System.arraycopy(grid[row], 0, copiedGrid[row], 0, 13);
+        int[][] copiedGrid = new int[BOARD_SIZE][BOARD_SIZE];
+        for (int row = 0; row < BOARD_SIZE; row++) {
+            System.arraycopy(grid[row], 0, copiedGrid[row], 0, BOARD_SIZE);
         }
-        return new Board(copiedGrid);
+        return new Board(copiedGrid, kingRow, kingCol, zobristPiecesHash);
     }
 
     public boolean isTerminal() { return getWinner() != 0; }
@@ -537,6 +818,16 @@ class Board {
 
     private int opponent(int player) {
         return isAttacker(player) ? BLACK : RED;
+    }
+
+    private long zobristKey(int playerToMove, int playerToHelp) {
+        return zobristPiecesHash
+                ^ ZOBRIST_SIDE_TO_MOVE[playerToMove]
+                ^ ZOBRIST_PERSPECTIVE[playerToHelp];
+    }
+
+    private static long zobristPiece(int row, int col, int piece) {
+        return ZOBRIST_PIECES[row * BOARD_SIZE + col][piece];
     }
 
     private int kingEscapeScore(int blockerWeight) {
