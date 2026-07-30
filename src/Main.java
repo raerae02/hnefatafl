@@ -10,6 +10,8 @@ public class Main {
         test8_roiSandwichPasCapture();
         test9_minimaxAlphaBetaMemeScore();
         test10_iaPrendVictoireImmediate();
+        test11_rechercheRestaurePlateau();
+        test12_timeoutRestaurePlateau();
     }
 
     static void test1_captureSimple() {
@@ -170,5 +172,49 @@ public class Main {
         boolean ok = bestMove != null && bestMove.toRow == 0 && bestMove.toCol == 0;
 
         System.out.println(ok ? "PASS : roi va au coin" : "FAIL : meilleur coup inattendu");
+    }
+
+    static void test11_rechercheRestaurePlateau() {
+        System.out.println("Test 11 : la recherche restaure le plateau");
+        int[][] g = new int[13][13];
+        g[6][6] = Board.KING;
+        g[3][4] = Board.BLACK;
+        g[3][6] = Board.BLACK;
+        g[3][3] = Board.RED;
+        g[3][7] = Board.RED;
+        g[5][5] = Board.RED;
+
+        Board b = new Board(g);
+        String initialPosition = b.positionKey();
+        int initialRedEvaluation = b.evaluate(Board.RED);
+        int initialBlackEvaluation = b.evaluate(Board.BLACK);
+
+        b.minimaxAlphaBeta(2, Board.RED, Board.RED);
+
+        boolean ok = initialPosition.equals(b.positionKey())
+                && initialRedEvaluation == b.evaluate(Board.RED)
+                && initialBlackEvaluation == b.evaluate(Board.BLACK);
+        System.out.println(ok ? "PASS : plateau restaure" : "FAIL : la recherche a modifie le plateau");
+    }
+
+    static void test12_timeoutRestaurePlateau() {
+        System.out.println("Test 12 : un timeout restaure le plateau");
+        int[][] g = new int[13][13];
+        g[6][6] = Board.KING;
+        g[6][4] = Board.BLACK;
+        g[4][6] = Board.BLACK;
+        g[6][2] = Board.RED;
+        g[2][6] = Board.RED;
+
+        Board b = new Board(g);
+        String initialPosition = b.positionKey();
+        int initialEvaluation = b.evaluate(Board.RED);
+
+        b.getBestMoveTimed(Board.RED, 0, null);
+
+        boolean ok = initialPosition.equals(b.positionKey())
+                && initialEvaluation == b.evaluate(Board.RED);
+        System.out.println(ok ? "PASS : plateau restaure apres timeout"
+                : "FAIL : le timeout a laisse un coup simule");
     }
 }

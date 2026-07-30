@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 class Client {
-    private static final long TIME_BUDGET_MS = 3500;   // marge sur les 5 s du serveur
+    private static final long TIME_BUDGET_MS = 4000;   // marge sur les 5 s du serveur
     private static final int MAX_REJECTED_MOVES = 8;
 
     public static void main(String[] args) {

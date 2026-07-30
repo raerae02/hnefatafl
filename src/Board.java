@@ -25,9 +25,37 @@ class Board {
     // Deplace une piece et verifie les captures autour.
     public void applyMove(Move move) {
         int piece = grid[move.fromRow][move.fromCol];
+        makeMove(move, piece);
+    }
 
+    /*
+     * Joue un coup directement sur ce plateau et retourne un masque indiquant
+     * quelles directions ont produit une capture. La recherche peut ainsi
+     * restaurer le plateau sans creer une copie complete pour chaque enfant.
+     */
+    private int makeMove(Move move, int piece) {
         movePiece(move, piece);
-        captureAround(move.toRow, move.toCol, piece);
+        return captureAround(move.toRow, move.toCol, piece);
+    }
+
+    private void unmakeMove(Move move, int piece, int captureMask) {
+        grid[move.fromRow][move.fromCol] = piece;
+        grid[move.toRow][move.toCol] = EMPTY;
+
+        if (piece == KING) {
+            kingRow = move.fromRow;
+            kingCol = move.fromCol;
+        }
+
+        int capturedPiece = isAttacker(piece) ? BLACK : RED;
+        for (int directionIndex = 0; directionIndex < DIRECTIONS.length; directionIndex++) {
+            if ((captureMask & (1 << directionIndex)) == 0) continue;
+
+            int[] direction = DIRECTIONS[directionIndex];
+            int capturedRow = move.toRow + direction[0];
+            int capturedCol = move.toCol + direction[1];
+            grid[capturedRow][capturedCol] = capturedPiece;
+        }
     }
 
     private void movePiece(Move move, int piece) {
@@ -40,8 +68,11 @@ class Board {
         }
     }
 
-    private void captureAround(int row, int col, int piece) {
-        for (int[] direction : DIRECTIONS) {
+    private int captureAround(int row, int col, int piece) {
+        int captureMask = 0;
+
+        for (int directionIndex = 0; directionIndex < DIRECTIONS.length; directionIndex++) {
+            int[] direction = DIRECTIONS[directionIndex];
             int victimRow = row + direction[0];
             int victimCol = col + direction[1];
             int otherSideRow = row + 2 * direction[0];
@@ -53,8 +84,11 @@ class Board {
             if (victim != EMPTY && !sameTeam(victim, piece) && victim != KING
                     && shouldCapture(otherSideRow, otherSideCol, piece)) {
                 grid[victimRow][victimCol] = EMPTY;
+                captureMask |= 1 << directionIndex;
             }
         }
+
+        return captureMask;
     }
 
     private boolean shouldCapture(int row, int col, int piece) {
@@ -151,14 +185,19 @@ class Board {
                 Map<String, Integer> scores = new HashMap<>();
 
                 for (Move move : moves) {
-                    Board nextBoard = copy();
-                    nextBoard.applyMove(move);
-                    int score = nextBoard.alphaBeta(depth - 1, opponent(player), player,
-                            alpha, Integer.MAX_VALUE);
+                    int piece = grid[move.fromRow][move.fromCol];
+                    int captureMask = makeMove(move, piece);
+                    int score;
+                    try {
+                        score = alphaBeta(depth - 1, opponent(player), player,
+                                alpha, Integer.MAX_VALUE);
 
-                    if (positionHistory != null) {
-                        Integer timesSeen = positionHistory.get(nextBoard.positionKey());
-                        if (timesSeen != null) score -= timesSeen * 500;
+                        if (positionHistory != null) {
+                            Integer timesSeen = positionHistory.get(positionKey());
+                            if (timesSeen != null) score -= timesSeen * 500;
+                        }
+                    } finally {
+                        unmakeMove(move, piece, captureMask);
                     }
 
                     scores.put(move.toString(), score);
@@ -237,9 +276,9 @@ class Board {
      * - player represente le joueur dont c'est le tour dans ce niveau de recherche.
      * - playerToHelp represente le joueur pour lequel on cherche le meilleur coup.
      *
-     * La methode simule chaque coup sur une copie du plateau, puis appelle recursivement
-     * minimax pour le joueur adverse. Quand la profondeur arrive a 0, ou quand la partie
-     * est terminee, evaluate(playerToHelp) donne une note au plateau.
+     * La methode joue chaque coup directement, appelle recursivement minimax pour
+     * le joueur adverse, puis restaure le plateau. Quand la profondeur arrive a 0,
+     * ou quand la partie est terminee, evaluate(playerToHelp) donne une note au plateau.
      *
      * Si c'est le tour de playerToHelp, on garde le score le plus grand, car ce joueur
      * cherche a ameliorer sa position. Sinon, on garde le score le plus petit, car on
@@ -260,9 +299,14 @@ class Board {
         }
 
         for (Move move : moves) {
-            Board nextBoard = copy();
-            nextBoard.applyMove(move);
-            int score = nextBoard.minimax(depth - 1, opponent(player), playerToHelp);
+            int piece = grid[move.fromRow][move.fromCol];
+            int captureMask = makeMove(move, piece);
+            int score;
+            try {
+                score = minimax(depth - 1, opponent(player), playerToHelp);
+            } finally {
+                unmakeMove(move, piece, captureMask);
+            }
 
             if (isGoodPlayerTurn) {
                 bestScore = Math.max(bestScore, score);
@@ -290,9 +334,9 @@ class Board {
      * beta est le meilleur score deja trouve pour le joueur qui minimise.
      *
      * Dans ce code, getBestMove utilise alphaBeta pour noter chaque coup possible :
-     * le coup est applique sur une copie du plateau, puis alphaBeta estime la suite
-     * de la partie. Si beta <= alpha, la branche est arretee avec break, car elle
-     * ne peut pas produire un meilleur choix que ce qui a deja ete trouve.
+     * le coup est joue puis annule sur le meme plateau pendant qu'alphaBeta estime
+     * la suite. Si beta <= alpha, la branche est arretee avec break, car elle ne
+     * peut pas produire un meilleur choix que ce qui a deja ete trouve.
      */
     private int alphaBeta(int depth, int player, int playerToHelp, int alpha, int beta) {
         if (System.currentTimeMillis() > searchDeadline) throw new SearchTimeout();
@@ -304,9 +348,14 @@ class Board {
         if (player == playerToHelp) {
             int bestScore = Integer.MIN_VALUE;
             for (Move move : moves) {
-                Board nextBoard = copy();
-                nextBoard.applyMove(move);
-                int score = nextBoard.alphaBeta(depth - 1, opponent(player), playerToHelp, alpha, beta);
+                int piece = grid[move.fromRow][move.fromCol];
+                int captureMask = makeMove(move, piece);
+                int score;
+                try {
+                    score = alphaBeta(depth - 1, opponent(player), playerToHelp, alpha, beta);
+                } finally {
+                    unmakeMove(move, piece, captureMask);
+                }
                 bestScore = Math.max(bestScore, score);
                 alpha = Math.max(alpha, bestScore);
                 if (beta <= alpha) break;
@@ -316,9 +365,14 @@ class Board {
 
         int bestScore = Integer.MAX_VALUE;
         for (Move move : moves) {
-            Board nextBoard = copy();
-            nextBoard.applyMove(move);
-            int score = nextBoard.alphaBeta(depth - 1, opponent(player), playerToHelp, alpha, beta);
+            int piece = grid[move.fromRow][move.fromCol];
+            int captureMask = makeMove(move, piece);
+            int score;
+            try {
+                score = alphaBeta(depth - 1, opponent(player), playerToHelp, alpha, beta);
+            } finally {
+                unmakeMove(move, piece, captureMask);
+            }
             bestScore = Math.min(bestScore, score);
             beta = Math.min(beta, bestScore);
             if (beta <= alpha) break;
