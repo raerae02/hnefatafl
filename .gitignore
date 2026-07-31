@@ -32,3 +32,13 @@ bin/
 *.class
 .idea/
 *.iml
+
+### Training runtime ###
+__pycache__/
+*.py[cod]
+.training-env/
+.training-tools/
+build/
+dist/
+training/output/
+models/*.hnn

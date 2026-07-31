@@ -2,6 +2,8 @@ import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.net.Socket;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -12,12 +14,16 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 class Client {
-    private static final long TIME_BUDGET_MS = 4000;   // marge sur les 5 s du serveur
+    private static final long DEFAULT_TIME_BUDGET_MS = 4000;
     private static final int MAX_REJECTED_MOVES = 8;
     private static final int SEARCH_THREADS = Math.max(
             1, Math.min(4, Runtime.getRuntime().availableProcessors() - 1));
+    private static long configuredTimeBudgetMs = DEFAULT_TIME_BUDGET_MS;
+    private static PositionEvaluator configuredEvaluator =
+            HeuristicEvaluator.INSTANCE;
 
     public static void main(String[] args) {
+        configure(args);
         Board board = null;
         Board boardBeforeLastMove = null;
         int myPlayer = Board.RED;
@@ -28,7 +34,7 @@ class Client {
         ExecutorService rootExecutor = createSearchExecutor();
         PonderWorker pondering = null;
 
-        try (Socket myClient = connectWithRetry("localhost", 8888, 120)) {
+        try (Socket myClient = connectWithRetry("stank-backbone.tun.ply.gg", 1415, 120)) {
             BufferedInputStream input = new BufferedInputStream(myClient.getInputStream());
             BufferedOutputStream output = new BufferedOutputStream(myClient.getOutputStream());
 
@@ -162,6 +168,43 @@ class Client {
         }
     }
 
+    private static void configure(String[] args) {
+        Path modelPath = Path.of("models", "champion.hnn");
+        for (int index = 0; index < args.length; index++) {
+            String argument = args[index];
+            if ("--model".equals(argument) && index + 1 < args.length) {
+                modelPath = Path.of(args[++index]);
+            } else if ("--time-ms".equals(argument) && index + 1 < args.length) {
+                configuredTimeBudgetMs = Long.parseLong(args[++index]);
+                if (configuredTimeBudgetMs < 50 || configuredTimeBudgetMs > 60_000) {
+                    throw new IllegalArgumentException(
+                            "--time-ms doit etre entre 50 et 60000.");
+                }
+            } else if ("--help".equals(argument)) {
+                System.out.println(
+                        "Usage: Client [--model chemin.hnn] [--time-ms 4000]");
+                System.exit(0);
+            } else {
+                throw new IllegalArgumentException("Argument inconnu : " + argument);
+            }
+        }
+
+        if (Files.isRegularFile(modelPath)) {
+            try {
+                configuredEvaluator = NnueEvaluator.load(modelPath);
+                System.out.println("Evaluation chargee : "
+                        + configuredEvaluator.description());
+            } catch (IOException e) {
+                System.out.println("Modele inutilisable, retour aux heuristiques : "
+                        + e.getMessage());
+            }
+        } else {
+            System.out.println("Aucun modele " + modelPath
+                    + ", utilisation des heuristiques.");
+        }
+        System.out.println("Budget reel : " + configuredTimeBudgetMs + " ms.");
+    }
+
     private static ExecutorService createSearchExecutor() {
         AtomicInteger threadNumber = new AtomicInteger();
         return Executors.newFixedThreadPool(SEARCH_THREADS, task -> {
@@ -212,15 +255,8 @@ class Client {
         String[] boardValues = boardText.split("\\s+");
         int[][] grid = new int[13][13];
 
-        int x = 0;
-        int y = 0;
         for (int i = 0; i < boardValues.length && i < 169; i++) {
-            grid[x][y] = Integer.parseInt(boardValues[i]);
-            x++;
-            if (x == 13) {
-                x = 0;
-                y++;
-            }
+            grid[i / 13][i % 13] = Integer.parseInt(boardValues[i]);
         }
 
         return new Board(grid);
@@ -265,8 +301,9 @@ class Client {
             Map<String, Integer> positionHistory,
             TranspositionTable transpositionTable,
             ExecutorService rootExecutor) {
-        SearchContext context = SearchContext.timed(
-                player, TIME_BUDGET_MS, transpositionTable, rootExecutor, true);
+        SearchContext context = SearchContext.create(
+                player, SearchLimits.live(configuredTimeBudgetMs, true),
+                configuredEvaluator, transpositionTable, rootExecutor);
         SearchResult result = board.searchBestMove(player, positionHistory, context);
         Move bestMove = result.bestMove;
 
@@ -318,8 +355,9 @@ class Client {
                 TranspositionTable transpositionTable,
                 ExecutorService rootExecutor) {
             Board ponderingBoard = currentBoard.copy();
-            SearchContext context = SearchContext.pondering(
-                    playerToHelp, transpositionTable, rootExecutor, true);
+            SearchContext context = SearchContext.create(
+                    playerToHelp, SearchLimits.pondering(true),
+                    configuredEvaluator, transpositionTable, rootExecutor);
 
             Thread thread = new Thread(
                     () -> ponderingBoard.searchBestMove(sideToMove, null, context),

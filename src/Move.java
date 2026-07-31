@@ -46,6 +46,23 @@ public class Move {
         return toSquare(fromRow, fromCol) + "-" + toSquare(toRow, toCol);
     }
 
+    int encode() {
+        return 1 + fromRow
+                + (fromCol << 4)
+                + (toRow << 8)
+                + (toCol << 12);
+    }
+
+    static Move decode(int encoded) {
+        if (encoded <= 0) return null;
+        int packed = encoded - 1;
+        return new Move(
+                packed & 0xF,
+                (packed >>> 4) & 0xF,
+                (packed >>> 8) & 0xF,
+                (packed >>> 12) & 0xF);
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) return true;

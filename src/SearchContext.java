@@ -10,6 +10,8 @@ import java.util.concurrent.atomic.LongAdder;
 final class SearchContext {
     private final int playerToHelp;
     private final long deadlineNanos;
+    private final SearchLimits limits;
+    private final PositionEvaluator evaluator;
     private final AtomicBoolean stopRequested = new AtomicBoolean();
     private final TranspositionTable transpositionTable;
     private final int tableGeneration;
@@ -25,37 +27,46 @@ final class SearchContext {
 
     private volatile boolean ignoreDeadline;
 
-    private SearchContext(int playerToHelp, long timeBudgetMs,
+    private SearchContext(int playerToHelp, SearchLimits limits,
+                          PositionEvaluator evaluator,
                           TranspositionTable transpositionTable,
-                          ExecutorService rootExecutor, boolean parallelRoot) {
+                          ExecutorService rootExecutor) {
         this.playerToHelp = playerToHelp;
-        this.deadlineNanos = timeBudgetMs == Long.MAX_VALUE
+        this.limits = limits;
+        this.evaluator = evaluator == null ? HeuristicEvaluator.INSTANCE : evaluator;
+        this.deadlineNanos = limits.timeBudgetMs == Long.MAX_VALUE
                 ? Long.MAX_VALUE
-                : System.nanoTime() + timeBudgetMs * 1_000_000L;
+                : System.nanoTime() + limits.timeBudgetMs * 1_000_000L;
         this.transpositionTable = transpositionTable;
         this.tableGeneration = transpositionTable.beginSearch();
         this.rootExecutor = rootExecutor;
-        this.parallelRoot = parallelRoot && rootExecutor != null;
+        this.parallelRoot = limits.parallelRoot && rootExecutor != null;
     }
 
     static SearchContext timed(int playerToHelp, long timeBudgetMs,
                                TranspositionTable transpositionTable,
                                ExecutorService rootExecutor, boolean parallelRoot) {
-        return new SearchContext(playerToHelp, timeBudgetMs,
-                transpositionTable, rootExecutor, parallelRoot);
+        return create(playerToHelp, SearchLimits.live(timeBudgetMs, parallelRoot),
+                HeuristicEvaluator.INSTANCE, transpositionTable, rootExecutor);
+    }
+
+    static SearchContext create(int playerToHelp, SearchLimits limits,
+                                PositionEvaluator evaluator,
+                                TranspositionTable transpositionTable,
+                                ExecutorService rootExecutor) {
+        return new SearchContext(playerToHelp, limits, evaluator,
+                transpositionTable, rootExecutor);
     }
 
     static SearchContext pondering(int playerToHelp,
                                    TranspositionTable transpositionTable,
                                    ExecutorService rootExecutor, boolean parallelRoot) {
-        return new SearchContext(playerToHelp, Long.MAX_VALUE,
-                transpositionTable, rootExecutor, parallelRoot);
+        return create(playerToHelp, SearchLimits.pondering(parallelRoot),
+                HeuristicEvaluator.INSTANCE, transpositionTable, rootExecutor);
     }
 
     void beginIteration(int depth) {
-        // Comme dans la version precedente, la profondeur 2 est garantie.
-        // Une demande explicite d'arret reste cependant toujours prioritaire.
-        ignoreDeadline = depth == 2;
+        ignoreDeadline = limits.guaranteeMinDepth && depth <= limits.minDepth;
     }
 
     void checkStopped() {
@@ -75,6 +86,18 @@ final class SearchContext {
 
     int playerToHelp() {
         return playerToHelp;
+    }
+
+    PositionEvaluator evaluator() {
+        return evaluator;
+    }
+
+    int minDepth() {
+        return limits.minDepth;
+    }
+
+    int maxDepth() {
+        return limits.maxDepth;
     }
 
     TranspositionTable table() {

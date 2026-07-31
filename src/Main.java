@@ -18,6 +18,10 @@ public class Main {
         test13_tableTranspositionReutilisee();
         test14_rechercheParallelePrendVictoire();
         test15_ponderingSarreteProprement();
+        test16_cordonValorisePourAttaquant();
+        test17_doubleRouteValoriseePourDefense();
+        test18_iaAttaquanteCaptureRoi();
+        test19_evaluationsReellementAsymetriques();
     }
 
     static void test1_captureSimple() {
@@ -303,5 +307,88 @@ public class Main {
             context.requestStop();
             executor.shutdownNow();
         }
+    }
+
+    static void test16_cordonValorisePourAttaquant() {
+        System.out.println("Test 16 : le cordon est valorise pour l'attaquant");
+
+        int[][] openGrid = new int[13][13];
+        openGrid[6][6] = Board.KING;
+        openGrid[3][3] = Board.RED;
+        openGrid[3][9] = Board.RED;
+        openGrid[9][3] = Board.RED;
+        openGrid[9][9] = Board.RED;
+
+        int[][] cordonGrid = new int[13][13];
+        cordonGrid[6][6] = Board.KING;
+        cordonGrid[5][6] = Board.RED;
+        cordonGrid[7][6] = Board.RED;
+        cordonGrid[6][5] = Board.RED;
+        cordonGrid[6][10] = Board.RED;
+
+        Board open = new Board(openGrid);
+        Board cordon = new Board(cordonGrid);
+        boolean ok = cordon.evaluate(Board.RED) > open.evaluate(Board.RED)
+                && cordon.evaluate(Board.BLACK) < open.evaluate(Board.BLACK);
+
+        System.out.println(ok ? "PASS : le territoire ferme favorise rouge"
+                : "FAIL : le cordon n'est pas correctement evalue");
+    }
+
+    static void test17_doubleRouteValoriseePourDefense() {
+        System.out.println("Test 17 : une double route vers les coins est prioritaire");
+
+        int[][] doubleRouteGrid = new int[13][13];
+        doubleRouteGrid[0][6] = Board.KING;
+        doubleRouteGrid[2][9] = Board.RED;
+
+        int[][] singleRouteGrid = new int[13][13];
+        singleRouteGrid[0][6] = Board.KING;
+        singleRouteGrid[0][9] = Board.RED;
+
+        Board doubleRoute = new Board(doubleRouteGrid);
+        Board singleRoute = new Board(singleRouteGrid);
+        boolean ok = doubleRoute.evaluate(Board.BLACK) > singleRoute.evaluate(Board.BLACK)
+                && doubleRoute.evaluate(Board.RED) < singleRoute.evaluate(Board.RED);
+
+        System.out.println(ok ? "PASS : la fourche d'evasion est reconnue"
+                : "FAIL : la double route est sous-evaluee");
+    }
+
+    static void test18_iaAttaquanteCaptureRoi() {
+        System.out.println("Test 18 : l'IA attaquante termine l'encerclement");
+        int[][] g = new int[13][13];
+        g[6][7] = Board.KING;
+        g[5][7] = Board.RED;
+        g[7][7] = Board.RED;
+        g[6][10] = Board.RED;
+
+        Board b = new Board(g);
+        Move bestMove = b.getBestMoveTimed(Board.RED, 100, null);
+        boolean ok = bestMove != null
+                && bestMove.fromRow == 6 && bestMove.fromCol == 10
+                && bestMove.toRow == 6 && bestMove.toCol == 8;
+
+        System.out.println(ok ? "PASS : capture forcee du roi trouvee"
+                : "FAIL : l'IA laisse echapper la victoire");
+    }
+
+    static void test19_evaluationsReellementAsymetriques() {
+        System.out.println("Test 19 : chaque camp possede sa propre evaluation");
+        int[][] g = new int[13][13];
+        g[4][5] = Board.KING;
+        g[4][3] = Board.BLACK;
+        g[0][1] = Board.BLACK;
+        g[4][8] = Board.RED;
+        g[1][0] = Board.RED;
+        g[8][5] = Board.RED;
+
+        Board b = new Board(g);
+        int defenderScore = b.evaluate(Board.BLACK);
+        int attackerScore = b.evaluate(Board.RED);
+        boolean ok = defenderScore != -attackerScore;
+
+        System.out.println(ok ? "PASS : poids distincts par role"
+                : "FAIL : l'evaluation reste un simple miroir");
     }
 }

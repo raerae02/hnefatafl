@@ -1,4 +1,5 @@
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -8,11 +9,20 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
 class Board {
-    private static final int BOARD_SIZE = 13;
+    static final int BOARD_SIZE = 13;
     private static final int SQUARE_COUNT = BOARD_SIZE * BOARD_SIZE;
-    private static final int WIN_SCORE = 100000;
+    static final int WIN_SCORE = 100000;
+    private static final int MAX_QUIESCENCE_DEPTH = 2;
+    private static final int NO_ESCAPE_ROUTE = 99;
     static final int EMPTY = 0, BLACK = 2, RED = 4, KING = 5;
     private static final int[][] DIRECTIONS = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+    private static final int[][] CORNERS = {{0, 0}, {0, 12}, {12, 0}, {12, 12}};
+    private static final int[][][] CORNER_GATEWAYS = {
+            {{0, 1}, {1, 0}},
+            {{0, 11}, {1, 12}},
+            {{12, 1}, {11, 0}},
+            {{12, 11}, {11, 12}}
+    };
     private static final long[][] ZOBRIST_PIECES = new long[SQUARE_COUNT][6];
     private static final long[] ZOBRIST_SIDE_TO_MOVE = new long[6];
     private static final long[] ZOBRIST_PERSPECTIVE = new long[6];
@@ -213,16 +223,26 @@ class Board {
                                 SearchContext context) {
         List<Move> moves = orderMoves(getLegalMoves(sideToMove), null);
         if (moves.isEmpty()) {
-            return new SearchResult(null, evaluate(context.playerToHelp()), 0, context);
+            return new SearchResult(
+                    null, evaluate(context, sideToMove), 0, context);
         }
 
         boolean maximizingRoot = sideToMove == context.playerToHelp();
         Map<Move, Integer> previousScores = new HashMap<>();
         Move bestMove = moves.get(0);
-        int bestScore = evaluate(context.playerToHelp());
+        int bestScore = evaluate(context, sideToMove);
         int completedDepth = 0;
 
-        for (int depth = 2; depth <= 12; depth++) {
+        Map<Move, Float> learnedPolicy = context.evaluator().rootPolicyScores(
+                this, sideToMove, moves);
+        if (!learnedPolicy.isEmpty()) {
+            moves.sort((first, second) -> Integer.compare(
+                    learnedRootOrderingScore(second, learnedPolicy),
+                    learnedRootOrderingScore(first, learnedPolicy)));
+            bestMove = moves.get(0);
+        }
+
+        for (int depth = context.minDepth(); depth <= context.maxDepth(); depth++) {
             context.beginIteration(depth);
             try {
                 orderRootMoves(moves, previousScores, sideToMove,
@@ -252,7 +272,8 @@ class Board {
             }
         }
 
-        return new SearchResult(bestMove, bestScore, completedDepth, context);
+        return new SearchResult(bestMove, bestScore, completedDepth, context,
+                previousScores, maximizingRoot);
     }
 
     private RootIterationResult searchRootSequential(
@@ -409,6 +430,14 @@ class Board {
         return maximizing ? score > currentBest : score < currentBest;
     }
 
+    private int learnedRootOrderingScore(
+            Move move, Map<Move, Float> learnedPolicy) {
+        int policyBonus = Math.round(
+                learnedPolicy.getOrDefault(move, 0.0f) * 5_000.0f);
+        policyBonus = Math.max(-40_000, Math.min(40_000, policyBonus));
+        return movePriority(move) + policyBonus;
+    }
+
     private void cancelFutures(List<? extends Future<?>> futures) {
         for (Future<?> future : futures) {
             future.cancel(true);
@@ -416,28 +445,16 @@ class Board {
     }
 
     /*
-     * Ordonne les coups pour l'alpha-beta : captures d'abord, puis coups du roi,
-     * puis le reste. Essayer les coups forts en premier resserre alpha/beta tot
-     * et fait couper la recherche beaucoup plus vite, donc on va plus profond.
+     * Ordre tactique puis strategique inspire des travaux sur le Hnefatafl :
+     * victoire immediate, parade d'une fuite, capture, mobilisation du roi,
+     * controle des portes de coin et resserrement du cordon. Le meilleur coup
+     * de la table de transposition reste prioritaire.
      */
     private List<Move> orderMoves(List<Move> moves, Move preferredMove) {
-        List<Move> ordered = new ArrayList<>(moves.size());
-        List<Move> kingMoves = new ArrayList<>();
-        List<Move> quiet = new ArrayList<>(moves.size());
-
-        for (Move move : moves) {
-            if (move.equals(preferredMove)) continue;
-            if (isCapturingMove(move)) ordered.add(move);
-            else if (grid[move.fromRow][move.fromCol] == KING) kingMoves.add(move);
-            else quiet.add(move);
-        }
-
-        if (preferredMove != null && moves.contains(preferredMove)) {
-            ordered.add(0, preferredMove);
-        }
-        ordered.addAll(kingMoves);
-        ordered.addAll(quiet);
-        return ordered;
+        moves.sort((first, second) ->
+                Integer.compare(movePriority(second), movePriority(first)));
+        moveToFront(moves, preferredMove);
+        return moves;
     }
 
     private void moveToFront(List<Move> moves, Move preferredMove) {
@@ -474,7 +491,12 @@ class Board {
 
     // Estimation rapide (sans jouer le coup) : ce coup capture-t-il une piece ?
     private boolean isCapturingMove(Move move) {
+        return captureCountForMove(move) > 0;
+    }
+
+    private int captureCountForMove(Move move) {
         int piece = grid[move.fromRow][move.fromCol];
+        int captures = 0;
         for (int[] direction : DIRECTIONS) {
             int victimRow = move.toRow + direction[0];
             int victimCol = move.toCol + direction[1];
@@ -483,8 +505,117 @@ class Board {
             int victim = grid[victimRow][victimCol];
             if (victim != EMPTY && victim != KING && !sameTeam(victim, piece)
                     && shouldCapture(move.toRow + 2 * direction[0], move.toCol + 2 * direction[1], piece)) {
+                captures++;
+            }
+        }
+        return captures;
+    }
+
+    private int movePriority(Move move) {
+        int piece = grid[move.fromRow][move.fromCol];
+        int priority = 0;
+
+        if ((piece == KING && isCorner(move.toRow, move.toCol))
+                || (piece == RED && wouldCaptureKing(move))) {
+            return 1_000_000;
+        }
+
+        if (piece == RED && blocksCurrentEscapeLine(move)) {
+            priority += 350_000;
+        }
+
+        int captures = captureCountForMove(move);
+        if (captures > 0) {
+            priority += 120_000 + captures * 20_000;
+        }
+
+        int destinationGateway = cornerGatewayValue(move.toRow, move.toCol);
+        int originGateway = cornerGatewayValue(move.fromRow, move.fromCol);
+
+        if (piece == KING) {
+            int before = closestCornerManhattan(move.fromRow, move.fromCol);
+            int after = closestCornerManhattan(move.toRow, move.toCol);
+            priority += 55_000 + (before - after) * 2_500;
+            priority += destinationGateway * 8_000;
+            if (isEdge(move.toRow, move.toCol)) priority += 12_000;
+        } else if (piece == BLACK) {
+            // Foot-in-the-Door et garde mobile : occuper une porte avant le barrage.
+            priority += destinationGateway * 12_000;
+            priority -= originGateway * 5_000;
+            int distance = manhattan(move.toRow, move.toCol, kingRow, kingCol);
+            if (distance <= 3) priority += (4 - distance) * 1_500;
+        } else {
+            // Un attaquant prefere un anneau a 2-4 cases au simple contact glouton.
+            priority += destinationGateway * 14_000;
+            priority -= originGateway * 6_000;
+            int distance = manhattan(move.toRow, move.toCol, kingRow, kingCol);
+            priority += Math.max(0, 5 - Math.abs(distance - 3)) * 1_200;
+            if (move.toRow == kingRow || move.toCol == kingCol) priority += 4_000;
+            if (manhattan(move.toRow, move.toCol, kingRow, kingCol) == 1) {
+                priority += 25_000;
+            }
+        }
+
+        return priority;
+    }
+
+    private boolean wouldCaptureKing(Move move) {
+        int movingPiece = grid[move.fromRow][move.fromCol];
+        if (movingPiece != RED) return false;
+
+        for (int[] direction : DIRECTIONS) {
+            int row = kingRow + direction[0];
+            int col = kingCol + direction[1];
+            if (!inBounds(row, col) || isCorner(row, col) || isThrone(row, col)) {
+                continue;
+            }
+
+            int occupant;
+            if (row == move.toRow && col == move.toCol) occupant = movingPiece;
+            else if (row == move.fromRow && col == move.fromCol) occupant = EMPTY;
+            else occupant = grid[row][col];
+
+            if (occupant != RED) return false;
+        }
+        return true;
+    }
+
+    private boolean blocksCurrentEscapeLine(Move move) {
+        for (int[] corner : CORNERS) {
+            if (!hasClearRookLine(kingRow, kingCol, corner[0], corner[1])) continue;
+            if (liesStrictlyBetween(move.toRow, move.toCol,
+                    kingRow, kingCol, corner[0], corner[1])) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    private boolean hasClearRookLine(int fromRow, int fromCol, int toRow, int toCol) {
+        if (fromRow != toRow && fromCol != toCol) return false;
+
+        int rowDirection = Integer.signum(toRow - fromRow);
+        int colDirection = Integer.signum(toCol - fromCol);
+        int row = fromRow + rowDirection;
+        int col = fromCol + colDirection;
+        while (row != toRow || col != toCol) {
+            if (grid[row][col] != EMPTY) return false;
+            row += rowDirection;
+            col += colDirection;
+        }
+        return grid[toRow][toCol] == EMPTY || isCorner(toRow, toCol);
+    }
+
+    private boolean liesStrictlyBetween(int row, int col,
+                                        int firstRow, int firstCol,
+                                        int secondRow, int secondCol) {
+        if (firstRow == secondRow && row == firstRow) {
+            return col > Math.min(firstCol, secondCol)
+                    && col < Math.max(firstCol, secondCol);
+        }
+        if (firstCol == secondCol && col == firstCol) {
+            return row > Math.min(firstRow, secondRow)
+                    && row < Math.max(firstRow, secondRow);
         }
         return false;
     }
@@ -514,10 +645,14 @@ class Board {
      * suppose que l'adversaire joue aussi le meilleur coup possible contre lui.
      */
     public int minimax(int depth, int player, int playerToHelp) {
-        if (depth == 0 || isTerminal()) return evaluate(playerToHelp);
+        if (isTerminal()) return evaluate(playerToHelp, player);
+        if (depth == 0) {
+            return quiescenceMinimax(
+                    player, playerToHelp, MAX_QUIESCENCE_DEPTH);
+        }
 
         List<Move> moves = getLegalMoves(player);
-        if (moves.isEmpty()) return evaluate(playerToHelp);
+        if (moves.isEmpty()) return evaluate(playerToHelp, player);
 
         boolean isGoodPlayerTurn = player == playerToHelp;
         int bestScore;
@@ -544,6 +679,35 @@ class Board {
             }
         }
 
+        return bestScore;
+    }
+
+    private int quiescenceMinimax(int player, int playerToHelp,
+                                  int remainingDepth) {
+        if (isTerminal() || remainingDepth == 0) {
+            return evaluate(playerToHelp, player);
+        }
+
+        boolean maximizing = player == playerToHelp;
+        int bestScore = evaluate(playerToHelp, player);
+
+        for (Move move : getLegalMoves(player)) {
+            if (!isTacticalMove(move)) continue;
+
+            int piece = grid[move.fromRow][move.fromCol];
+            int captureMask = makeMove(move, piece);
+            int score;
+            try {
+                score = quiescenceMinimax(
+                        opponent(player), playerToHelp, remainingDepth - 1);
+            } finally {
+                unmakeMove(move, piece, captureMask);
+            }
+
+            if (isBetterScore(score, bestScore, maximizing)) {
+                bestScore = score;
+            }
+        }
         return bestScore;
     }
 
@@ -575,6 +739,15 @@ class Board {
         context.recordNode();
         context.checkStopped();
 
+        if (isTerminal()) {
+            context.recordLeaf();
+            return evaluate(context, player);
+        }
+
+        if (depth == 0) {
+            return quiescence(player, alpha, beta, MAX_QUIESCENCE_DEPTH, context);
+        }
+
         int originalAlpha = alpha;
         int originalBeta = beta;
         long key = zobristKey(player, context.playerToHelp());
@@ -602,18 +775,10 @@ class Board {
             }
         }
 
-        if (depth == 0 || isTerminal()) {
-            context.recordLeaf();
-            int score = evaluate(context.playerToHelp());
-            context.table().store(key, depth, score, TranspositionTable.Bound.EXACT,
-                    null, context.tableGeneration());
-            return score;
-        }
-
         List<Move> moves = orderMoves(getLegalMoves(player), preferredMove);
         if (moves.isEmpty()) {
             context.recordLeaf();
-            int score = evaluate(context.playerToHelp());
+            int score = evaluate(context, player);
             context.table().store(key, depth, score, TranspositionTable.Bound.EXACT,
                     null, context.tableGeneration());
             return score;
@@ -662,51 +827,263 @@ class Board {
     }
 
     /*
-     * evaluate donne une note numerique au plateau pour le joueur donne.
-     * Cette note est utilisee par minimax et alphaBeta quand la recherche s'arrete.
-     *
-     * Une victoire donne un tres grand score positif pour l'equipe du joueur, et un
-     * tres grand score negatif si l'adversaire a gagne. Sinon, la position est estimee
-     * avec trois criteres :
-     * - material : avantage en nombre de pieces.
-     * - mobility : difference entre les coups possibles des defenseurs et des attaquants.
-     * - kingSafety : facilite pour le roi de se rapprocher d'une sortie.
-     *
-     * Le score est calcule du point de vue des defenseurs, puis inverse si le joueur
-     * demande est l'attaquant rouge. Ainsi, un score positif est toujours bon pour
-     * le joueur passe en parametre.
+     * Recherche de stabilisation limitee. Une feuille n'est pas evaluee juste
+     * avant une capture, une fuite du roi ou un blocage critique : ces coups
+     * tactiques sont prolonges sur deux demi-coups au maximum.
+     */
+    private int quiescence(int player, int alpha, int beta, int remainingDepth,
+                           SearchContext context) {
+        context.checkStopped();
+
+        if (isTerminal()) {
+            context.recordLeaf();
+            return evaluate(context, player);
+        }
+
+        int standPat = evaluate(context, player);
+        context.recordLeaf();
+        if (remainingDepth == 0) return standPat;
+
+        boolean maximizing = player == context.playerToHelp();
+        int bestScore = standPat;
+
+        if (maximizing) {
+            if (bestScore >= beta) return bestScore;
+            alpha = Math.max(alpha, bestScore);
+        } else {
+            if (bestScore <= alpha) return bestScore;
+            beta = Math.min(beta, bestScore);
+        }
+
+        List<Move> tacticalMoves = new ArrayList<>();
+        for (Move move : getLegalMoves(player)) {
+            if (isTacticalMove(move)) tacticalMoves.add(move);
+        }
+        orderMoves(tacticalMoves, null);
+
+        for (Move move : tacticalMoves) {
+            context.recordNode();
+            context.checkStopped();
+
+            int piece = grid[move.fromRow][move.fromCol];
+            int captureMask = makeMove(move, piece);
+            int score;
+            try {
+                score = quiescence(opponent(player), alpha, beta,
+                        remainingDepth - 1, context);
+            } finally {
+                unmakeMove(move, piece, captureMask);
+            }
+
+            if (isBetterScore(score, bestScore, maximizing)) {
+                bestScore = score;
+            }
+
+            if (maximizing) alpha = Math.max(alpha, bestScore);
+            else beta = Math.min(beta, bestScore);
+
+            if (beta <= alpha) {
+                context.recordCutoff();
+                break;
+            }
+        }
+
+        return bestScore;
+    }
+
+    private boolean isTacticalMove(Move move) {
+        int piece = grid[move.fromRow][move.fromCol];
+
+        if ((piece == KING && isCorner(move.toRow, move.toCol))
+                || (piece == RED && wouldCaptureKing(move))
+                || isCapturingMove(move)) {
+            return true;
+        }
+
+        if (piece == KING) {
+            return isEdge(move.toRow, move.toCol)
+                    || cornerGatewayValue(move.toRow, move.toCol) > 0;
+        }
+
+        if (piece == RED) {
+            return blocksCurrentEscapeLine(move)
+                    || manhattan(move.toRow, move.toCol, kingRow, kingCol) == 1;
+        }
+
+        return manhattan(move.fromRow, move.fromCol, kingRow, kingCol) == 1;
+    }
+
+    /*
+     * Evaluation asymetrique : les deux camps ne poursuivent pas le meme but.
+     * Les defenseurs valorisent les routes independantes, le roi mobile, l'escorte
+     * et Foot-in-the-Door. Les attaquants valorisent les portes barricadees, le
+     * cordon, la reduction du territoire du roi et la menace de capture.
      */
     public int evaluate(int player) {
+        return evaluate(player, 0);
+    }
+
+    private int evaluate(int player, int sideToMove) {
         int winner = getWinner();
         if (winner != 0) {
             return sameTeam(winner, player) ? WIN_SCORE : -WIN_SCORE;
         }
 
-        int redPieces = 0;
-        int blackPieces = 0;
-        int kingPressure = 0;
+        PositionFeatures features = collectPositionFeatures();
+        int score = isDefender(player)
+                ? evaluateDefenders(features, sideToMove)
+                : evaluateAttackers(features, sideToMove);
+        return Math.max(-WIN_SCORE + 1, Math.min(WIN_SCORE - 1, score));
+    }
 
-        for (int row = 0; row < 13; row++) {
-            for (int col = 0; col < 13; col++) {
-                if (grid[row][col] == RED) {
-                    redPieces++;
-                    // pression : plus un rouge est proche du roi, mieux c'est pour rouge
-                    kingPressure += 24 - (Math.abs(row - kingRow) + Math.abs(col - kingCol));
+    int evaluateHeuristic(int player, int sideToMove) {
+        return evaluate(player, sideToMove);
+    }
+
+    private int evaluate(SearchContext context, int sideToMove) {
+        int winner = getWinner();
+        if (winner != 0) {
+            return sameTeam(winner, context.playerToHelp())
+                    ? WIN_SCORE : -WIN_SCORE;
+        }
+
+        int score = context.evaluator().evaluate(
+                this, context.playerToHelp(), sideToMove);
+        return Math.max(-WIN_SCORE + 1, Math.min(WIN_SCORE - 1, score));
+    }
+
+    private PositionFeatures collectPositionFeatures() {
+        PositionFeatures features = new PositionFeatures();
+
+        for (int row = 0; row < BOARD_SIZE; row++) {
+            for (int col = 0; col < BOARD_SIZE; col++) {
+                int piece = grid[row][col];
+                if (piece == RED) {
+                    features.attackers++;
+                } else if (piece == BLACK) {
+                    features.defenders++;
+                    int distance = manhattan(row, col, kingRow, kingCol);
+                    if (distance <= 3) {
+                        features.escortStrength += 4 - distance;
+                    }
                 }
-                if (grid[row][col] == BLACK) blackPieces++;
             }
         }
 
-        int material = (blackPieces * 100) - (redPieces * 80);
-        int mobility = (countMoves(BLACK) - countMoves(RED)) * 2;
+        features.routes = analyzeKingRoutes();
+        features.defenderMoves = countMoves(BLACK);
+        features.attackerMoves = countMoves(RED);
+        features.kingMoves = countMovesFrom(kingRow, kingCol, KING);
+        features.blockedKingSides = countBlockedKingSides();
+        features.actionableKingSides = countActionableKingCaptureSquares();
+        features.kingCaptureThreat = features.blockedKingSides == 3
+                && features.actionableKingSides > 0;
+        features.linePressure = kingLinePressure();
+        features.cornerControl = attackerCornerControl();
+        features.fortifications = countDefenderFortifications();
+        features.threatenedAttackers = countThreatenedSoldiers(RED);
+        features.threatenedDefenders = countThreatenedSoldiers(BLACK);
+        return features;
+    }
 
-        // poids asymetrique : le rouge valorise fortement fermer les cotes du roi,
-        // le noir garde un roi audacieux qui fonce vers les coins
-        int blockerWeight = isDefender(player) ? 30 : 60;
-        int kingSafety = kingEscapeScore(blockerWeight);
-        int defenderScore = material + mobility + kingSafety - (kingPressure * 2);
+    private int evaluateDefenders(PositionFeatures features, int sideToMove) {
+        int phase = gamePhase(features.attackers + features.defenders);
+        int materialBalance = features.defenders * 90 - features.attackers * 45;
+        int shortestRoute = Math.min(9, features.routes.shortestEscapeTurns);
+        int routeWeight = phase == 0 ? 170 : phase == 1 ? 240 : 310;
+        int cordonPenalty = phase == 0 ? 18 : phase == 1 ? 38 : 48;
+        int escortWeight = phase == 0 ? 35 : phase == 1 ? 55 : 30;
+        int mobilityWeight = phase == 0 ? 5 : phase == 1 ? 7 : 9;
 
-        return isDefender(player) ? defenderScore : -defenderScore;
+        int score = materialBalance;
+        if (features.routes.shortestEscapeTurns == NO_ESCAPE_ROUTE) {
+            score -= 5_000;
+        } else {
+            score += (9 - shortestRoute) * routeWeight;
+        }
+
+        score += features.routes.reachableSquares * (phase == 1 ? 5 : 3);
+        score += features.routes.edgeSquaresReachable * 24;
+        score += features.kingMoves * mobilityWeight;
+        score += (features.defenderMoves - features.attackerMoves);
+        score += features.escortStrength * escortWeight;
+        score += features.fortifications * (phase == 2 ? 35 : 15);
+        score += features.threatenedAttackers * 30;
+        score -= features.threatenedDefenders * 65;
+
+        score -= features.cornerControl * (phase == 0 ? 3 : phase == 1 ? 2 : 1);
+        score -= features.routes.attackerBoundaryPieces * cordonPenalty;
+        score -= features.blockedKingSides * (phase == 2 ? 1_350 : 850);
+        score -= features.actionableKingSides * 300;
+        score -= features.linePressure * 30;
+
+        int directCorners = Integer.bitCount(features.routes.directCornerMask);
+        int futureCorners = Integer.bitCount(
+                features.routes.nearTermCornerMask & ~features.routes.directCornerMask);
+        score += futureCorners * (phase == 0 ? 650 : 950);
+        score += escapeUrgency(directCorners, sideToMove);
+
+        if (features.kingCaptureThreat) {
+            score -= captureThreatUrgency(sideToMove);
+        }
+        return score;
+    }
+
+    private int evaluateAttackers(PositionFeatures features, int sideToMove) {
+        int phase = gamePhase(features.attackers + features.defenders);
+        int materialBalance = features.attackers * 45 - features.defenders * 90;
+        int shortestRoute = Math.min(9, features.routes.shortestEscapeTurns);
+        int cordonWeight = phase == 0 ? 4 : phase == 1 ? 7 : 8;
+        int boundaryWeight = phase == 0 ? 24 : phase == 1 ? 50 : 62;
+        int blockedSideWeight = phase == 2 ? 1_600 : 1_050;
+
+        int score = materialBalance;
+        score += shortestRoute * (phase == 2 ? 300 : 220);
+        score += (SQUARE_COUNT - features.routes.reachableSquares) * cordonWeight;
+        score += features.routes.attackerBoundaryPieces * boundaryWeight;
+        score += features.cornerControl * (phase == 0 ? 4 : phase == 1 ? 2 : 1);
+        score += features.blockedKingSides * blockedSideWeight;
+        score += features.actionableKingSides * 380;
+        score += features.linePressure * 38;
+        score += (features.attackerMoves - features.defenderMoves);
+        score += features.threatenedDefenders * 75;
+
+        score -= features.kingMoves * (phase == 0 ? 6 : phase == 1 ? 10 : 13);
+        score -= features.escortStrength * (phase == 1 ? 45 : 28);
+        score -= features.fortifications * 20;
+        score -= features.threatenedAttackers * 35;
+
+        int directCorners = Integer.bitCount(features.routes.directCornerMask);
+        int futureCorners = Integer.bitCount(
+                features.routes.nearTermCornerMask & ~features.routes.directCornerMask);
+        score -= futureCorners * (phase == 0 ? 700 : 1_050);
+        score -= escapeUrgency(directCorners, sideToMove);
+
+        if (features.kingCaptureThreat) {
+            score += captureThreatUrgency(sideToMove);
+        }
+        return score;
+    }
+
+    private int escapeUrgency(int directCorners, int sideToMove) {
+        if (directCorners == 0) return 0;
+        if (directCorners >= 2) return 58_000;
+        if (sideToMove == BLACK) return 72_000;
+        if (sideToMove == RED) return 12_000;
+        return 30_000;
+    }
+
+    private int captureThreatUrgency(int sideToMove) {
+        if (sideToMove == RED) return 72_000;
+        if (sideToMove == BLACK) return 18_000;
+        return 36_000;
+    }
+
+    // 0 = ouverture, 1 = milieu, 2 = finale pour une configuration 32 contre 16.
+    private int gamePhase(int remainingSoldiers) {
+        if (remainingSoldiers >= 36) return 0;
+        if (remainingSoldiers >= 18) return 1;
+        return 2;
     }
 
     public Board copy() {
@@ -715,6 +1092,20 @@ class Board {
             System.arraycopy(grid[row], 0, copiedGrid[row], 0, BOARD_SIZE);
         }
         return new Board(copiedGrid, kingRow, kingCol, zobristPiecesHash);
+    }
+
+    byte[] encodedPosition() {
+        byte[] encoded = new byte[SQUARE_COUNT];
+        for (int row = 0; row < BOARD_SIZE; row++) {
+            for (int col = 0; col < BOARD_SIZE; col++) {
+                encoded[row * BOARD_SIZE + col] = (byte) grid[row][col];
+            }
+        }
+        return encoded;
+    }
+
+    long piecesHash() {
+        return zobristPiecesHash;
     }
 
     public boolean isTerminal() { return getWinner() != 0; }
@@ -746,6 +1137,11 @@ class Board {
 
     // Verifie la validite d'un coup (exigence de l'enonce pour les coups adverses).
     boolean isValidMove(Move move){
+        if (move == null
+                || !inBounds(move.fromRow, move.fromCol)
+                || !inBounds(move.toRow, move.toCol)) {
+            return false;
+        }
         int piece = grid[move.fromRow][move.fromCol];
 
         if(piece == EMPTY) return false;
@@ -820,6 +1216,10 @@ class Board {
         return isAttacker(player) ? BLACK : RED;
     }
 
+    static int opposingSide(int player) {
+        return player == RED ? BLACK : RED;
+    }
+
     private long zobristKey(int playerToMove, int playerToHelp) {
         return zobristPiecesHash
                 ^ ZOBRIST_SIDE_TO_MOVE[playerToMove]
@@ -830,60 +1230,346 @@ class Board {
         return ZOBRIST_PIECES[row * BOARD_SIZE + col][piece];
     }
 
-    private int kingEscapeScore(int blockerWeight) {
-        // roi colle a un coin libre : victoire noire imparable au prochain coup
-        // (personne ne peut occuper le coin, s'interposer ou capturer le roi a temps)
-        if (isCorner(kingRow - 1, kingCol) || isCorner(kingRow + 1, kingCol)
-                || isCorner(kingRow, kingCol - 1) || isCorner(kingRow, kingCol + 1)) {
-            return 50000;
+    /*
+     * BFS sur le graphe des mouvements de tour du roi. Contrairement a Manhattan,
+     * il compte des tours reels et tient compte des pieces qui ferment les lignes.
+     * Le plateau est statique pendant cette estimation : elle mesure la geometrie
+     * actuelle, tandis que l'alpha-beta voit les ouvertures et blocages futurs.
+     */
+    private KingRouteAnalysis analyzeKingRoutes() {
+        KingRouteAnalysis analysis = new KingRouteAnalysis();
+        byte[] distance = new byte[SQUARE_COUNT];
+        Arrays.fill(distance, (byte) -1);
+        int[] queue = new int[SQUARE_COUNT];
+
+        int start = kingRow * BOARD_SIZE + kingCol;
+        distance[start] = 0;
+        queue[0] = start;
+        int head = 0;
+        int tail = 1;
+
+        while (head < tail) {
+            int square = queue[head++];
+            int row = square / BOARD_SIZE;
+            int col = square % BOARD_SIZE;
+            int currentDistance = distance[square];
+            if (isCorner(row, col)) continue;
+
+            for (int[] direction : DIRECTIONS) {
+                int toRow = row + direction[0];
+                int toCol = col + direction[1];
+
+                while (inBounds(toRow, toCol) && isOpenForVirtualKing(toRow, toCol)) {
+                    int target = toRow * BOARD_SIZE + toCol;
+                    int nextDistance = currentDistance + 1;
+
+                    if (distance[target] == -1) {
+                        distance[target] = (byte) nextDistance;
+                        queue[tail++] = target;
+                    }
+
+                    if (isCorner(toRow, toCol)) {
+                        int cornerBit = 1 << cornerIndex(toRow, toCol);
+                        analysis.shortestEscapeTurns = Math.min(
+                                analysis.shortestEscapeTurns, nextDistance);
+                        if (currentDistance == 0) {
+                            analysis.directCornerMask |= cornerBit;
+                        }
+                        if (currentDistance <= 1) {
+                            analysis.nearTermCornerMask |= cornerBit;
+                        }
+                    }
+
+                    toRow += direction[0];
+                    toCol += direction[1];
+                }
+            }
         }
 
-        int openCornerLines = 0;
-        if (hasOpenCornerLine(0, -1)) openCornerLines++;
-        if (hasOpenCornerLine(0, 1)) openCornerLines++;
-        if (hasOpenCornerLine(-1, 0)) openCornerLines++;
-        if (hasOpenCornerLine(1, 0)) openCornerLines++;
+        boolean[] boundaryAttackers = new boolean[SQUARE_COUNT];
+        for (int square = 0; square < SQUARE_COUNT; square++) {
+            if (distance[square] < 0) continue;
 
-        // fourche : deux lignes ouvertes vers des coins, l'attaquant ne peut en bloquer qu'une
-        if (openCornerLines >= 2) return 40000;
+            analysis.reachableSquares++;
+            int row = square / BOARD_SIZE;
+            int col = square % BOARD_SIZE;
+            if (distance[square] == 1) analysis.oneMoveSquares++;
+            if (isEdge(row, col) && !isCorner(row, col)) {
+                analysis.edgeSquaresReachable++;
+            }
 
-        int closestCorner = Math.min(
-                Math.min(kingRow + kingCol, kingRow + (12 - kingCol)),
-                Math.min((12 - kingRow) + kingCol, (12 - kingRow) + (12 - kingCol))
-        );
-
-        int score = (24 - closestCorner) * 10;
-        score += openCornerLines * 250;
-
-        int blockers = 0;
-        if (isEvalBlocker(kingRow - 1, kingCol)) blockers++;
-        if (isEvalBlocker(kingRow + 1, kingCol)) blockers++;
-        if (isEvalBlocker(kingRow, kingCol - 1)) blockers++;
-        if (isEvalBlocker(kingRow, kingCol + 1)) blockers++;
-
-        // fermer un cote du roi vaut plus qu'un pion : c'est le chemin vers la capture
-        return score - (blockers * blockerWeight);
-    }
-
-    // Pour l'evaluation : seuls un pion rouge ou le trone comptent comme bloqueurs.
-    // Les bords restent capturants dans getWinner, mais les penaliser ici
-    // decouragerait le roi d'utiliser les bords pour atteindre les coins.
-    private boolean isEvalBlocker(int row, int col) {
-        return inBounds(row, col) && (grid[row][col] == RED || isThrone(row, col));
-    }
-
-    // vrai si le roi a une ligne degagee jusqu'a un coin dans cette direction
-    private boolean hasOpenCornerLine(int rowDirection, int colDirection) {
-        int row = kingRow + rowDirection;
-        int col = kingCol + colDirection;
-
-        while (inBounds(row, col)) {
-            if (isCorner(row, col)) return true;
-            if (grid[row][col] != EMPTY) return false;
-            row += rowDirection;
-            col += colDirection;
+            if (distance[square] <= 1) {
+                for (int[] direction : DIRECTIONS) {
+                    int adjacentRow = row + direction[0];
+                    int adjacentCol = col + direction[1];
+                    if (inBounds(adjacentRow, adjacentCol)
+                            && grid[adjacentRow][adjacentCol] == RED) {
+                        boundaryAttackers[adjacentRow * BOARD_SIZE + adjacentCol] = true;
+                    }
+                }
+            }
         }
 
+        for (boolean boundaryAttacker : boundaryAttackers) {
+            if (boundaryAttacker) analysis.attackerBoundaryPieces++;
+        }
+        return analysis;
+    }
+
+    private boolean isOpenForVirtualKing(int row, int col) {
+        return grid[row][col] == EMPTY || (row == kingRow && col == kingCol);
+    }
+
+    private int countMovesFrom(int fromRow, int fromCol, int piece) {
+        int count = 0;
+        for (int[] direction : DIRECTIONS) {
+            int row = fromRow + direction[0];
+            int col = fromCol + direction[1];
+            while (inBounds(row, col) && grid[row][col] == EMPTY) {
+                if (piece == KING || !isHostileSquare(row, col)) count++;
+                row += direction[0];
+                col += direction[1];
+            }
+        }
+        return count;
+    }
+
+    private int countBlockedKingSides() {
+        int blocked = 0;
+        for (int[] direction : DIRECTIONS) {
+            if (isBlockedForKing(
+                    kingRow + direction[0], kingCol + direction[1])) {
+                blocked++;
+            }
+        }
+        return blocked;
+    }
+
+    private int countActionableKingCaptureSquares() {
+        int actionable = 0;
+        for (int[] direction : DIRECTIONS) {
+            int row = kingRow + direction[0];
+            int col = kingCol + direction[1];
+            if (!inBounds(row, col) || grid[row][col] != EMPTY
+                    || isHostileSquare(row, col)) {
+                continue;
+            }
+            if (canSideMoveTo(RED, row, col, true)) actionable++;
+        }
+        return actionable;
+    }
+
+    /*
+     * Cherche une piece pouvant atteindre la case cible. Quand
+     * preserveKingBlockers est vrai, un attaquant deja colle au roi n'est pas
+     * considere : le deplacer ouvrirait simultanement un autre cote.
+     */
+    private boolean canSideMoveTo(int player, int targetRow, int targetCol,
+                                  boolean preserveKingBlockers) {
+        if (!inBounds(targetRow, targetCol) || grid[targetRow][targetCol] != EMPTY) {
+            return false;
+        }
+        if (isAttacker(player) && isHostileSquare(targetRow, targetCol)) {
+            return false;
+        }
+
+        for (int[] direction : DIRECTIONS) {
+            int row = targetRow + direction[0];
+            int col = targetCol + direction[1];
+            while (inBounds(row, col) && grid[row][col] == EMPTY) {
+                row += direction[0];
+                col += direction[1];
+            }
+            if (!inBounds(row, col)) continue;
+
+            int piece = grid[row][col];
+            boolean belongsToSide = isAttacker(player)
+                    ? piece == RED
+                    : piece == BLACK || piece == KING;
+            if (!belongsToSide) continue;
+            if (isHostileSquare(targetRow, targetCol) && piece != KING) continue;
+            if (preserveKingBlockers && piece == RED
+                    && manhattan(row, col, kingRow, kingCol) == 1) {
+                continue;
+            }
+            return true;
+        }
         return false;
+    }
+
+    private int kingLinePressure() {
+        int pressure = 0;
+        for (int[] direction : DIRECTIONS) {
+            int row = kingRow + direction[0];
+            int col = kingCol + direction[1];
+            int distance = 1;
+            while (inBounds(row, col) && grid[row][col] == EMPTY) {
+                row += direction[0];
+                col += direction[1];
+                distance++;
+            }
+            if (!inBounds(row, col)) continue;
+
+            if (grid[row][col] == RED) {
+                pressure += Math.max(1, BOARD_SIZE + 1 - distance);
+            } else if (grid[row][col] == BLACK) {
+                pressure -= Math.max(1, 8 - distance);
+            }
+        }
+        return pressure;
+    }
+
+    /*
+     * Valeur positive quand les attaquants possedent ou peuvent prendre les
+     * deux portes d'un coin; negative quand les defenseurs ont deja mis le pied
+     * dans la porte. Les cases a deux pas servent de soutien mais pesent moins.
+     */
+    private int attackerCornerControl() {
+        int control = 0;
+
+        for (int corner = 0; corner < CORNERS.length; corner++) {
+            int occupiedGateways = 0;
+            int cornerRow = CORNERS[corner][0];
+            int cornerCol = CORNERS[corner][1];
+
+            for (int[] gateway : CORNER_GATEWAYS[corner]) {
+                int row = gateway[0];
+                int col = gateway[1];
+                int piece = grid[row][col];
+                if (piece == RED) {
+                    control += 110;
+                    occupiedGateways++;
+                } else if (piece == BLACK || piece == KING) {
+                    control -= 95;
+                } else {
+                    if (canSideMoveTo(RED, row, col, false)) control += 20;
+                    if (canSideMoveTo(BLACK, row, col, false)) control -= 15;
+                }
+
+                int supportRow = cornerRow + 2 * Integer.signum(row - cornerRow);
+                int supportCol = cornerCol + 2 * Integer.signum(col - cornerCol);
+                int support = grid[supportRow][supportCol];
+                if (support == RED) control += 24;
+                else if (support == BLACK || support == KING) control -= 18;
+            }
+
+            if (occupiedGateways == 2) control += 140;
+        }
+        return control;
+    }
+
+    private int countDefenderFortifications() {
+        int fortifications = 0;
+        for (int row = 0; row < BOARD_SIZE - 1; row++) {
+            for (int col = 0; col < BOARD_SIZE - 1; col++) {
+                if (grid[row][col] == BLACK
+                        && grid[row + 1][col] == BLACK
+                        && grid[row][col + 1] == BLACK
+                        && grid[row + 1][col + 1] == BLACK) {
+                    fortifications++;
+                }
+            }
+        }
+        return fortifications;
+    }
+
+    private int countThreatenedSoldiers(int victimPiece) {
+        int capturingSide = victimPiece == RED ? BLACK : RED;
+        int representativePiece = capturingSide == RED ? RED : BLACK;
+        int threatened = 0;
+
+        for (int row = 0; row < BOARD_SIZE; row++) {
+            for (int col = 0; col < BOARD_SIZE; col++) {
+                if (grid[row][col] != victimPiece) continue;
+
+                boolean canBeCaptured = false;
+                for (int[] direction : DIRECTIONS) {
+                    int landingRow = row + direction[0];
+                    int landingCol = col + direction[1];
+                    int supportRow = row - direction[0];
+                    int supportCol = col - direction[1];
+
+                    if (!inBounds(landingRow, landingCol)
+                            || grid[landingRow][landingCol] != EMPTY
+                            || !shouldCapture(supportRow, supportCol, representativePiece)) {
+                        continue;
+                    }
+
+                    if (canSideMoveTo(capturingSide, landingRow, landingCol, false)) {
+                        canBeCaptured = true;
+                        break;
+                    }
+                }
+                if (canBeCaptured) threatened++;
+            }
+        }
+        return threatened;
+    }
+
+    private int closestCornerManhattan(int row, int col) {
+        int closest = Integer.MAX_VALUE;
+        for (int[] corner : CORNERS) {
+            closest = Math.min(closest, manhattan(row, col, corner[0], corner[1]));
+        }
+        return closest;
+    }
+
+    private int cornerGatewayValue(int row, int col) {
+        for (int corner = 0; corner < CORNERS.length; corner++) {
+            int cornerRow = CORNERS[corner][0];
+            int cornerCol = CORNERS[corner][1];
+            for (int[] gateway : CORNER_GATEWAYS[corner]) {
+                if (row == gateway[0] && col == gateway[1]) return 3;
+
+                int supportRow = cornerRow
+                        + 2 * Integer.signum(gateway[0] - cornerRow);
+                int supportCol = cornerCol
+                        + 2 * Integer.signum(gateway[1] - cornerCol);
+                if (row == supportRow && col == supportCol) return 1;
+            }
+        }
+        return 0;
+    }
+
+    private int cornerIndex(int row, int col) {
+        if (row == 0) return col == 0 ? 0 : 1;
+        return col == 0 ? 2 : 3;
+    }
+
+    private boolean isEdge(int row, int col) {
+        return row == 0 || row == BOARD_SIZE - 1
+                || col == 0 || col == BOARD_SIZE - 1;
+    }
+
+    private int manhattan(int firstRow, int firstCol, int secondRow, int secondCol) {
+        return Math.abs(firstRow - secondRow) + Math.abs(firstCol - secondCol);
+    }
+
+    private static final class PositionFeatures {
+        int attackers;
+        int defenders;
+        int defenderMoves;
+        int attackerMoves;
+        int kingMoves;
+        int blockedKingSides;
+        int actionableKingSides;
+        int linePressure;
+        int cornerControl;
+        int escortStrength;
+        int fortifications;
+        int threatenedAttackers;
+        int threatenedDefenders;
+        boolean kingCaptureThreat;
+        KingRouteAnalysis routes;
+    }
+
+    private static final class KingRouteAnalysis {
+        int shortestEscapeTurns = NO_ESCAPE_ROUTE;
+        int reachableSquares;
+        int oneMoveSquares;
+        int edgeSquaresReachable;
+        int attackerBoundaryPieces;
+        int directCornerMask;
+        int nearTermCornerMask;
     }
 }

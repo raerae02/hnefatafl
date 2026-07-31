@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "bootstrap_games": 2000,
+  "games_per_cycle": 3000,
+  "games_per_shard": 64,
+  "min_move_ms": 50,
+  "max_move_ms": 300,
+  "max_plies": 300,
+  "training_epochs": 12,
+  "training_batch_size": 4096,
+  "arena_move_ms": 200,
+  "arena_min_games": 100,
+  "arena_max_games": 400,
+  "arena_opening_plies": 4,
+  "finalization_reserve_hours": 6,
+  "max_replay_positions": 10000000,
+  "max_output_bytes": 16106127360,
+  "profiles": {
+    "study": {
+      "workers": 3,
+      "loader_workers": 1,
+      "cpu_target": 0.45,
+      "gpu_duty": 0.55,
+      "memory_fraction": 0.60,
+      "priority": "below_normal"
+    },
+    "balanced": {
+      "workers": 4,
+      "loader_workers": 2,
+      "cpu_target": 0.70,
+      "gpu_duty": 0.80,
+      "memory_fraction": 0.75,
+      "priority": "below_normal"
+    },
+    "max": {
+      "workers": 6,
+      "loader_workers": 4,
+      "cpu_target": 0.95,
+      "gpu_duty": 0.98,
+      "memory_fraction": 0.90,
+      "priority": "normal"
+    }
+  }
+}
