@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 class Client {
-    private static final long TIME_BUDGET_MS = 3500;   // marge sur les 5 s du serveur
+    private static final long TIME_BUDGET_MS = 4000;   // marge sur les 5 s du serveur
     private static final int MAX_REJECTED_MOVES = 8;
 
     public static void main(String[] args) {
@@ -41,6 +41,7 @@ class Client {
                     sendMove(output, move);
                     board.applyMove(move);
                     recordPosition(board, positionHistory);
+                    board.startPondering(opponentOf(myPlayer));
                 }
 
                 if (cmd == '2') {
@@ -52,6 +53,7 @@ class Client {
                 }
 
                 if (cmd == '3') {
+                    Board.stopPondering();
                     String lastMove = readServerText(input, 16).trim();
                     System.out.println("Dernier coup : " + lastMove);
 
@@ -80,9 +82,11 @@ class Client {
                     sendMove(output, move);
                     board.applyMove(move);
                     recordPosition(board, positionHistory);
+                    board.startPondering(opponentOf(myPlayer));
                 }
 
                 if (cmd == '4') {
+                    Board.stopPondering();
                     System.out.println("Coup invalide.");
 
                     if (rejectedMoves.size() >= MAX_REJECTED_MOVES) {
@@ -105,6 +109,7 @@ class Client {
                 }
 
                 if (cmd == '5') {
+                    Board.stopPondering();
                     String lastMove = readServerText(input, 16).trim();
                     System.out.println("Partie terminee. Dernier coup joue : " + lastMove);
 
@@ -203,6 +208,10 @@ class Client {
         }
 
         return input.available();
+    }
+
+    private static int opponentOf(int player) {
+        return player == Board.RED ? Board.BLACK : Board.RED;
     }
 
     private static void recordPosition(Board board, Map<String, Integer> positionHistory) {
