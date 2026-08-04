@@ -12,12 +12,42 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-class Client {
+public class Client {
+    private static final String DEFAULT_HOST = "127.0.0.1";
+    private static final int DEFAULT_PORT = 8888;
     private static final long TIME_BUDGET_MS = 4400;   // marge sur les 5 s du serveur
                                                        // (pire depassement mesure ~70 ms apres l'echeance)
     private static final int MAX_REJECTED_MOVES = 8;
 
     public static void main(String[] args) {
+        if (args.length > 0 && ("--help".equals(args[0]) || "-h".equals(args[0]))) {
+            printUsage();
+            return;
+        }
+        if (args.length > 2) {
+            printUsage();
+            return;
+        }
+
+        String host = args.length >= 1 ? args[0].trim() : DEFAULT_HOST;
+        if (host.isEmpty()) {
+            System.out.println("L'adresse du serveur ne peut pas etre vide.");
+            printUsage();
+            return;
+        }
+
+        int port = DEFAULT_PORT;
+        if (args.length == 2) {
+            try {
+                port = Integer.parseInt(args[1]);
+                if (port < 1 || port > 65535) throw new NumberFormatException();
+            } catch (NumberFormatException e) {
+                System.out.println("Port invalide : " + args[1]);
+                printUsage();
+                return;
+            }
+        }
+
         Board board = null;
         Board boardBeforeLastMove = null;
         int myPlayer = Board.RED;
@@ -27,7 +57,8 @@ class Client {
         List<String> movesLog = new ArrayList<>();
 
         try {
-            Socket myClient = connectWithRetry("127.0.0.1", 8888, 120);
+            System.out.println("Connexion au serveur " + host + ":" + port + "...");
+            Socket myClient = connectWithRetry(host, port, 120);
             BufferedInputStream input = new BufferedInputStream(myClient.getInputStream());
             BufferedOutputStream output = new BufferedOutputStream(myClient.getOutputStream());
 
@@ -151,6 +182,11 @@ class Client {
         } catch (IOException e) {
             System.out.println(e);
         }
+    }
+
+    private static void printUsage() {
+        System.out.println("Utilisation : java -jar hnefatafl-client.jar [adresse-ip] [port]");
+        System.out.println("Par defaut : " + DEFAULT_HOST + ":" + DEFAULT_PORT);
     }
 
     // Reessaie la connexion tant que le serveur n'a pas demarre la partie.
