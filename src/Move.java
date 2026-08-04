@@ -1,5 +1,6 @@
 public class Move {
     int fromRow, fromCol, toRow, toCol;
+    int sortScore;   // note de tri temporaire utilisee par orderMoves
 
     Move(int fromRow, int fromCol, int toRow, int toCol) {
         this.fromRow = fromRow;

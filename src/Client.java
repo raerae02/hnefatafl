@@ -1,14 +1,20 @@
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.net.Socket;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 class Client {
-    private static final long TIME_BUDGET_MS = 4000;   // marge sur les 5 s du serveur
+    private static final long TIME_BUDGET_MS = 4400;   // marge sur les 5 s du serveur
+                                                       // (pire depassement mesure ~70 ms apres l'echeance)
     private static final int MAX_REJECTED_MOVES = 8;
 
     public static void main(String[] args) {
@@ -18,9 +24,10 @@ class Client {
         Move lastSentMove = null;
         List<String> rejectedMoves = new ArrayList<>();
         Map<String, Integer> positionHistory = new HashMap<>();
+        List<String> movesLog = new ArrayList<>();
 
         try {
-            Socket myClient = connectWithRetry("localhost", 8888, 120);
+            Socket myClient = connectWithRetry("127.0.0.1", 8888, 120);
             BufferedInputStream input = new BufferedInputStream(myClient.getInputStream());
             BufferedOutputStream output = new BufferedOutputStream(myClient.getOutputStream());
 
@@ -32,13 +39,15 @@ class Client {
                     myPlayer = Board.RED;
                     board = readInitialBoard(input);
                     positionHistory.clear();
-                    System.out.println("Nouvelle partie comme joueur blanc.");
+                    movesLog.clear();
+                    System.out.println("Nouvelle partie comme joueur rouge.");
 
-                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory);
+                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory, movesLog);
                     boardBeforeLastMove = board.copy();
                     lastSentMove = move;
                     rejectedMoves.clear();
                     sendMove(output, move);
+                    movesLog.add(colorName(myPlayer) + " " + move);
                     board.applyMove(move);
                     recordPosition(board, positionHistory);
                     board.startPondering(opponentOf(myPlayer));
@@ -49,6 +58,7 @@ class Client {
                     board = readInitialBoard(input);
                     lastSentMove = null;
                     positionHistory.clear();
+                    movesLog.clear();
                     System.out.println("Nouvelle partie comme joueur noir, attente du premier coup adverse.");
                 }
 
@@ -72,14 +82,16 @@ class Client {
                         } else {
                             board.applyMove(opponentMove);
                             recordPosition(board, positionHistory);
+                            movesLog.add(colorName(opponentOf(myPlayer)) + " " + opponentMove);
                         }
                     }
 
-                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory);
+                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory, movesLog);
                     boardBeforeLastMove = board.copy();
                     lastSentMove = move;
                     rejectedMoves.clear();
                     sendMove(output, move);
+                    movesLog.add(colorName(myPlayer) + " " + move);
                     board.applyMove(move);
                     recordPosition(board, positionHistory);
                     board.startPondering(opponentOf(myPlayer));
@@ -98,12 +110,17 @@ class Client {
                     }
                     if (lastSentMove != null) {
                         rejectedMoves.add(lastSentMove.toString());
+                        // le coup refuse avait deja ete note, on le retire
+                        if (!movesLog.isEmpty()) {
+                            movesLog.remove(movesLog.size() - 1);
+                        }
                     }
 
-                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory);
+                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory, movesLog);
                     boardBeforeLastMove = board.copy();
                     lastSentMove = move;
                     sendMove(output, move);
+                    movesLog.add(colorName(myPlayer) + " " + move);
                     board.applyMove(move);
                     recordPosition(board, positionHistory);
                 }
@@ -116,6 +133,16 @@ class Client {
                     // le gagnant recoit son propre dernier coup
                     boolean weWon = lastSentMove != null && lastMove.replace(" ", "").equals(lastSentMove.toString());
                     System.out.println(weWon ? "===> VICTOIRE !" : "===> DEFAITE (ou nul)");
+
+                    // en cas de defaite, le coup gagnant adverse n'est pas passe par '3'
+                    if (!weWon) {
+                        Move finalMove = Move.tryParse(lastMove);
+                        if (finalMove != null && (movesLog.isEmpty()
+                                || !movesLog.get(movesLog.size() - 1).endsWith(finalMove.toString()))) {
+                            movesLog.add(colorName(opponentOf(myPlayer)) + " " + finalMove);
+                        }
+                    }
+                    saveMovesLog(movesLog, myPlayer, weWon);
                     break;
                 }
             }
@@ -214,12 +241,80 @@ class Client {
         return player == Board.RED ? Board.BLACK : Board.RED;
     }
 
+    private static String colorName(int player) {
+        return player == Board.RED ? "ROUGE" : "NOIR";
+    }
+
+    // Ecrit la liste des coups dans parties\partie_DATE_HEURE.txt pour analyse.
+    private static void saveMovesLog(List<String> movesLog, int myPlayer, boolean weWon) {
+        try {
+            File dir = new File("parties");
+            dir.mkdirs();
+            String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+            File file = new File(dir, "partie_" + stamp + ".txt");
+            try (PrintWriter out = new PrintWriter(new FileWriter(file))) {
+                out.println("# Partie du " + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date()));
+                out.println("# Mon camp : " + colorName(myPlayer));
+                out.println("# Resultat : " + (weWon ? "VICTOIRE" : "DEFAITE (ou nul)"));
+                int numero = 1;
+                for (String coup : movesLog) {
+                    out.println(numero++ + ". " + coup);
+                }
+            }
+            System.out.println("Coups sauvegardes dans " + file.getPath());
+        } catch (IOException e) {
+            System.out.println("Impossible de sauvegarder les coups : " + e);
+        }
+    }
+
     private static void recordPosition(Board board, Map<String, Integer> positionHistory) {
         positionHistory.merge(board.positionKey(), 1, Integer::sum);
     }
 
+    /*
+     * Livre d'ouverture rouge : pour la ligne EXACTE de l'adversaire connu,
+     * joue d'office la branche validee par la serie du 3 aout (prefixe
+     * G12-B12 : 2 victoires + 1 nul, 0 defaite ; les branches M5-J5/M6-J6
+     * au meme carrefour : 3 defaites eclair par tour du roi). Cle = suite
+     * complete des coups joues ; a la moindre deviation adverse, aucune
+     * entree ne correspond et la recherche normale reprend.
+     */
+    private static final String[][] OPENING_BOOK = {
+        {"", "E13-C13"},
+        {"E13-C13 G8-C8", "M8-G8"},
+        {"E13-C13 G8-C8 M8-G8 F7-F8", "G8-K8"},
+        {"E13-C13 G8-C8 M8-G8 F7-F8 G8-K8 G9-K9", "I13-K13"},
+        {"E13-C13 G8-C8 M8-G8 F7-F8 G8-K8 G9-K9 I13-K13 J7-K7", "G12-B12"},
+        {"E13-C13 G8-C8 M8-G8 F7-F8 G8-K8 G9-K9 I13-K13 J7-K7 G12-B12 G7-G9", "H13-H9"},
+        {"E13-C13 G8-C8 M8-G8 F7-F8 G8-K8 G9-K9 I13-K13 J7-K7 G12-B12 G7-G9 H13-H9 G9-D9", "L7-L12"},
+    };
+
+    private static Move bookMove(Board board, int player, List<String> rejectedMoves, List<String> movesLog) {
+        if (player != Board.RED) return null;
+        StringBuilder history = new StringBuilder();
+        for (String entry : movesLog) {
+            // entrees du journal au format "ROUGE E13-C13" : ne garder que le coup
+            if (history.length() > 0) history.append(' ');
+            history.append(entry.substring(entry.lastIndexOf(' ') + 1));
+        }
+        String key = history.toString();
+        for (String[] line : OPENING_BOOK) {
+            if (line[0].equals(key)) {
+                Move move = Move.tryParse(line[1]);
+                if (move != null && board.isValidMove(move) && !rejectedMoves.contains(line[1])) {
+                    System.out.println("(livre d'ouverture : " + line[1] + ")");
+                    return move;
+                }
+            }
+        }
+        return null;
+    }
+
     private static Move chooseMove(Board board, int player, List<String> rejectedMoves,
-                                   Map<String, Integer> positionHistory) {
+                                   Map<String, Integer> positionHistory, List<String> movesLog) {
+        Move bookChoice = bookMove(board, player, rejectedMoves, movesLog);
+        if (bookChoice != null) return bookChoice;
+
         Move bestMove = board.getBestMoveTimed(player, TIME_BUDGET_MS, positionHistory);
         System.out.println("(profondeur atteinte : " + Board.lastSearchDepth + ")");
         if (bestMove != null && !rejectedMoves.contains(bestMove.toString())) {

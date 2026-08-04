@@ -48,6 +48,7 @@ class Board {
                 }
             }
         }
+        recomputeCounters();
     }
 
     // Copie directe : evite de rebalayer la grille pour retrouver roi et hash.
@@ -56,6 +57,61 @@ class Board {
         this.kingRow = kingRow;
         this.kingCol = kingCol;
         this.hash = hash;
+        recomputeCounters();
+    }
+
+    /*
+     * Compteurs incrementaux : evaluate n'a plus besoin de balayer les 169
+     * cases a chaque feuille. Ces valeurs sont mises a jour a chaque
+     * deplacement/capture (movePiece, removePieceCounters) et restaurees
+     * telles quelles par unmakeMove. sumDistRedToKing est la somme des
+     * distances de Manhattan des pions rouges au roi ; la pression rouge
+     * de l'evaluation s'en deduit : 24*redCount - sumDistRedToKing.
+     */
+    // cornerGuardNibbles : 4 compteurs de 4 bits (un par coin), nombre de
+    // gardes rouges en place sur les cases de garde de ce coin (0 a 3)
+    private int redCount, blackCount, sumDistRedToKing, cornerGuardNibbles;
+
+    private void recomputeCounters() {
+        redCount = 0;
+        blackCount = 0;
+        sumDistRedToKing = 0;
+        cornerGuardNibbles = 0;
+        for (int row = 0; row < 13; row++) {
+            for (int col = 0; col < 13; col++) {
+                if (grid[row][col] == RED) {
+                    redCount++;
+                    sumDistRedToKing += Math.abs(row - kingRow) + Math.abs(col - kingCol);
+                    if (CORNER_INDEX[row][col] >= 0) cornerGuardNibbles += 1 << (4 * CORNER_INDEX[row][col]);
+                } else if (grid[row][col] == BLACK) {
+                    blackCount++;
+                }
+            }
+        }
+    }
+
+    // Le roi a bouge : toutes les distances rouges changent, on rebalaye.
+    // Cout paye seulement aux coups du roi, plus a chaque feuille.
+    private void recomputeRedDistances() {
+        sumDistRedToKing = 0;
+        for (int row = 0; row < 13; row++) {
+            for (int col = 0; col < 13; col++) {
+                if (grid[row][col] == RED) {
+                    sumDistRedToKing += Math.abs(row - kingRow) + Math.abs(col - kingCol);
+                }
+            }
+        }
+    }
+
+    // Mise a jour des compteurs quand une piece (jamais le roi) est capturee.
+    private void removePieceCounters(int victim, int row, int col) {
+        if (victim == RED) {
+            redCount--;
+            sumDistRedToKing -= Math.abs(row - kingRow) + Math.abs(col - kingCol);
+            if (CORNER_INDEX[row][col] >= 0) cornerGuardNibbles -= 1 << (4 * CORNER_INDEX[row][col]);
+        } else {
+            blackCount--;
+        }
     }
 
     // Deplace une piece et verifie les captures autour.
@@ -74,6 +130,12 @@ class Board {
         if (piece == KING) {
             kingRow = move.toRow;
             kingCol = move.toCol;
+            recomputeRedDistances();
+        } else if (piece == RED) {
+            sumDistRedToKing += (Math.abs(move.toRow - kingRow) + Math.abs(move.toCol - kingCol))
+                              - (Math.abs(move.fromRow - kingRow) + Math.abs(move.fromCol - kingCol));
+            if (CORNER_INDEX[move.toRow][move.toCol] >= 0) cornerGuardNibbles += 1 << (4 * CORNER_INDEX[move.toRow][move.toCol]);
+            if (CORNER_INDEX[move.fromRow][move.fromCol] >= 0) cornerGuardNibbles -= 1 << (4 * CORNER_INDEX[move.fromRow][move.fromCol]);
         }
     }
 
@@ -91,6 +153,7 @@ class Board {
                     && shouldCapture(otherSideRow, otherSideCol, piece)) {
                 grid[victimRow][victimCol] = EMPTY;
                 hash ^= ZOBRIST[victimRow][victimCol][victim];
+                removePieceCounters(victim, victimRow, victimCol);
             }
         }
     }
@@ -112,17 +175,9 @@ class Board {
         return moves;
     }
 
-    // nombre de coups valides, sans creer d'objets (pour la mobilite dans evaluate)
-    private int countMoves(int player) {
-        return scanMoves(player, null);
-    }
-
     /*
      * Parcours commun : suit les 4 rayons de chaque piece du joueur (mouvement
-     * de tour) et retourne le nombre de coups valides. Si collector n'est pas
-     * null, chaque coup y est aussi ajoute. Le mode "comptage seul" evite de
-     * creer des milliers d'objets Move dans evaluate, appelee a chaque feuille
-     * de la recherche.
+     * de tour) et collecte les coups valides.
      */
     private int scanMoves(int player, List<Move> collector) {
         int count = 0;
@@ -163,7 +218,29 @@ class Board {
      *   bits 38-45 : case depart du meilleur coup   46-53 : case arrivee
      * Remplacement systematique (l'entree la plus recente gagne).
      */
-    private static final int TT_SIZE = 1 << 20;               // ~1M entrees (16 Mo)
+    /*
+     * Les scores de victoire dependent de la distance a la racine (WIN_SCORE - ply),
+     * mais une meme position peut etre atteinte a des profondeurs differentes.
+     * Dans la table, on stocke donc la distance DEPUIS LE NOEUD (independante de
+     * la racine) : conversion a l'ecriture (toTT) et a la lecture (fromTT).
+     */
+    private static final int MATE_BOUND = 90000;
+
+    private static int toTT(int score, int ply) {
+        if (score > MATE_BOUND) return score + ply;
+        if (score < -MATE_BOUND) return score - ply;
+        return score;
+    }
+
+    private static int fromTT(int score, int ply) {
+        if (score > MATE_BOUND) return score - ply;
+        if (score < -MATE_BOUND) return score + ply;
+        return score;
+    }
+
+    // 16 Mo : tient en grande partie dans le cache CPU (une table plus grande
+    // s'est averee plus lente en pratique, defauts de cache a chaque acces)
+    private static final int TT_SIZE = 1 << 20;               // ~1M entrees
     private static final long[] ttKeys = new long[TT_SIZE];
     private static final long[] ttData = new long[TT_SIZE];
     private static final int TT_EXACT = 0, TT_LOWER = 1, TT_UPPER = 2;
@@ -209,11 +286,24 @@ class Board {
      * alpha tres tot, ce qui fait couper l'alpha-beta beaucoup plus vite et
      * permet d'atteindre des profondeurs superieures dans le meme budget.
      */
+    // score de la derniere passe racine, pour la fenetre d'aspiration
+    private int lastRootScore;
+    private int previousBestScore;
+    private boolean hasPreviousScore;
+
     public Move getBestMoveTimed(int player, long timeBudgetMs, Map<String, Integer> positionHistory) {
         long deadline = System.currentTimeMillis() + timeBudgetMs;
+        hasPreviousScore = false;
 
         List<Move> moves = getLegalMoves(player);
         if (moves.isEmpty()) return null;
+
+        // Vieillissement du history : on divise tout par 2 a chaque nouveau coup.
+        // Les statistiques recentes dominent, les vieilles s'estompent, et les
+        // compteurs ne peuvent pas deborder au fil d'une longue partie.
+        for (int[] historyRow : historyTable) {
+            for (int i = 0; i < historyRow.length; i++) historyRow[i] >>= 1;
+        }
 
         Map<String, Integer> previousScores = new HashMap<>();
         Move bestMove = null;
@@ -235,8 +325,32 @@ class Board {
                             order.getOrDefault(a.toString(), Integer.MIN_VALUE)));
                 }
 
+                /*
+                 * Fenetre d'aspiration : le score d'une profondeur bouge
+                 * rarement beaucoup par rapport a la precedente. On cherche
+                 * d'abord dans une fenetre etroite autour du dernier score -
+                 * les bornes serrees font couper enormement. Si le resultat
+                 * sort de la fenetre (surprise), on refait la recherche avec
+                 * la fenetre complete : le resultat reste donc toujours exact.
+                 */
                 Map<String, Integer> scores = new HashMap<>();
-                Move iterationBest = searchRoot(moves, player, depth, positionHistory, scores);
+                Move iterationBest;
+                if (depth >= 4 && hasPreviousScore) {
+                    int windowAlpha = previousBestScore - 300;
+                    int windowBeta = previousBestScore + 300;
+                    iterationBest = searchRoot(moves, player, depth, positionHistory, scores,
+                            windowAlpha, windowBeta);
+                    if (lastRootScore <= windowAlpha || lastRootScore >= windowBeta) {
+                        scores = new HashMap<>();
+                        iterationBest = searchRoot(moves, player, depth, positionHistory, scores,
+                                Integer.MIN_VALUE, Integer.MAX_VALUE);
+                    }
+                } else {
+                    iterationBest = searchRoot(moves, player, depth, positionHistory, scores,
+                            Integer.MIN_VALUE, Integer.MAX_VALUE);
+                }
+                previousBestScore = lastRootScore;
+                hasPreviousScore = true;
 
                 bestMove = iterationBest;
                 lastSearchDepth = depth;
@@ -264,18 +378,33 @@ class Board {
     // penalite d'anti-repetition. Remplit scoresOut pour le tri de l'iteration
     // suivante et retourne le meilleur coup de cette profondeur.
     private Move searchRoot(List<Move> moves, int player, int depth,
-                            Map<String, Integer> positionHistory, Map<String, Integer> scoresOut) {
+                            Map<String, Integer> positionHistory, Map<String, Integer> scoresOut,
+                            int alphaInit, int betaInit) {
         Move best = null;
         int bestScore = Integer.MIN_VALUE;
-        int alpha = Integer.MIN_VALUE;
+        int alpha = alphaInit;
 
         for (Move move : moves) {
             makeMove(move);
             int score;
             String childKey;
             try {
-                score = alphaBeta(depth - 1, opponent(player), player,
-                        alpha, Integer.MAX_VALUE);
+                /*
+                 * PVS a la racine : le premier coup (le mieux classe par
+                 * l'iteration precedente) recoit la fenetre complete ; les
+                 * suivants une fenetre nulle, juste pour prouver qu'ils sont
+                 * moins bons. Si l'un d'eux surprend, re-recherche complete.
+                 */
+                if (best == null || !ttAggressive || alpha == Integer.MIN_VALUE) {
+                    score = alphaBeta(depth - 1, opponent(player), player,
+                            alpha, betaInit);
+                } else {
+                    score = alphaBeta(depth - 1, opponent(player), player, alpha, alpha + 1);
+                    if (score > alpha) {
+                        score = alphaBeta(depth - 1, opponent(player), player,
+                                alpha, betaInit);
+                    }
+                }
                 childKey = (positionHistory != null) ? positionKey() : null;
             } finally {
                 unmakeMove(move);
@@ -293,7 +422,11 @@ class Board {
             }
             // borne prudente : le score penalise est toujours <= au score brut
             alpha = Math.max(alpha, score);
+            // fenetre d'aspiration depassee : inutile de continuer, la passe
+            // sera refaite avec la fenetre complete
+            if (alpha >= betaInit) break;
         }
+        lastRootScore = bestScore;
         return best;
     }
 
@@ -323,7 +456,8 @@ class Board {
                 ttAggressive = true;
                 searchDeadline = Long.MAX_VALUE;
                 for (int depth = 2; depth <= 12; depth++) {
-                    local.searchRoot(local.getLegalMoves(playerToMove), playerToMove, depth, null, null);
+                    local.searchRoot(local.getLegalMoves(playerToMove), playerToMove, depth, null, null,
+                            Integer.MIN_VALUE, Integer.MAX_VALUE);
                 }
             } catch (SearchTimeout ignored) {
                 // arret normal demande par stopPondering
@@ -355,7 +489,8 @@ class Board {
             Thread helper = new Thread(() -> {
                 try {
                     for (int depth = startDepth; depth <= 12; depth++) {
-                        localBoard.searchRoot(localBoard.getLegalMoves(player), player, depth, null, null);
+                        localBoard.searchRoot(localBoard.getLegalMoves(player), player, depth, null, null,
+                                Integer.MIN_VALUE, Integer.MAX_VALUE);
                     }
                 } catch (SearchTimeout ignored) {
                     // fin normale : le temps est ecoule
@@ -368,69 +503,89 @@ class Board {
     }
 
     /*
-     * Recherche de quiescence : a la profondeur 0, on ne s'arrete pas net -
-     * on explore encore les CAPTURES (jusqu'a 4 demi-coups) pour ne jamais
-     * evaluer une position au milieu d'un echange. "Stand pat" : le joueur
-     * au trait peut toujours refuser de capturer et garder son evaluation.
-     */
-    private int quiescence(int player, int playerToHelp, int alpha, int beta, int captureDepth) {
-        if (System.currentTimeMillis() > searchDeadline) throw new SearchTimeout();
-        if (isTerminal()) return evaluate(playerToHelp);
-
-        int standPat = evaluate(playerToHelp);
-        if (captureDepth <= 0) return standPat;
-
-        boolean maximizing = (player == playerToHelp);
-        if (maximizing) {
-            if (standPat >= beta) return standPat;
-            alpha = Math.max(alpha, standPat);
-        } else {
-            if (standPat <= alpha) return standPat;
-            beta = Math.min(beta, standPat);
-        }
-
-        for (Move move : getLegalMoves(player)) {
-            if (!isCapturingMove(move)) continue;
-
-            Board nextBoard = copy();
-            nextBoard.applyMove(move);
-            int score = nextBoard.quiescence(opponent(player), playerToHelp, alpha, beta, captureDepth - 1);
-
-            if (maximizing) {
-                alpha = Math.max(alpha, score);
-            } else {
-                beta = Math.min(beta, score);
-            }
-            if (alpha >= beta) break;
-        }
-
-        return maximizing ? alpha : beta;
-    }
-
-    /*
-     * Ordonne les coups pour l'alpha-beta : captures, puis killer moves du
-     * niveau, puis coups du roi, puis le reste trie par history. Essayer les
+     * Ordonne les coups pour l'alpha-beta : meilleur coup memorise dans la
+     * table de transposition, puis captures, puis killer moves du niveau,
+     * puis coups du roi, puis le reste trie par history (les coups tranquilles
+     * qui ont souvent provoque des coupures passent en premier). Essayer les
      * coups forts en premier resserre alpha/beta tot et fait couper la
      * recherche beaucoup plus vite, donc on va plus profond.
      */
-    private List<Move> orderMoves(List<Move> moves, int depth) {
-        List<Move> ordered = new ArrayList<>(moves.size());
-        List<Move> killers = new ArrayList<>(2);
-        List<Move> kingMoves = new ArrayList<>();
-        List<Move> quiet = new ArrayList<>(moves.size());
+    private static final int SCORE_CAPTURE = 1_500_000_000;
+    private static final int SCORE_KILLER  = 1_400_000_000;
+    private static final int SCORE_KING    = 1_300_000_000;
+    private static final int SCORE_QUIET_CAP = 1_200_000_000;
 
-        for (Move move : moves) {
-            int packed = packMove(move);
-            if (isCapturingMove(move)) ordered.add(move);
-            else if (packed == killer1[depth] || packed == killer2[depth]) killers.add(move);
-            else if (grid[move.fromRow][move.fromCol] == KING) kingMoves.add(move);
-            else quiet.add(move);
+    private void orderMoves(Move[] buffer, int count, int depth, int ttFrom, int ttTo) {
+        for (int i = 0; i < count; i++) {
+            Move move = buffer[i];
+            int from = move.fromRow * 13 + move.fromCol;
+            int to = move.toRow * 13 + move.toCol;
+            if (from == ttFrom && to == ttTo) move.sortScore = Integer.MAX_VALUE;
+            else if (isCapturingMove(move)) move.sortScore = SCORE_CAPTURE;
+            else {
+                int packed = from * 169 + to;
+                if (packed == killer1[depth] || packed == killer2[depth]) move.sortScore = SCORE_KILLER;
+                else if (grid[move.fromRow][move.fromCol] == KING) move.sortScore = SCORE_KING;
+                else move.sortScore = Math.min(historyTable[from][to], SCORE_QUIET_CAP);
+            }
         }
+        // tri par insertion, stable et sans allocation (le tri de List creait
+        // un tableau temporaire a CHAQUE noeud)
+        for (int i = 1; i < count; i++) {
+            Move move = buffer[i];
+            int score = move.sortScore;
+            int j = i - 1;
+            while (j >= 0 && buffer[j].sortScore < score) {
+                buffer[j + 1] = buffer[j];
+                j--;
+            }
+            buffer[j + 1] = move;
+        }
+    }
 
-        ordered.addAll(killers);
-        ordered.addAll(kingMoves);
-        ordered.addAll(quiet);
-        return ordered;
+    /*
+     * Generation sans allocation : les objets Move de chaque niveau (ply)
+     * sont mis en commun et reutilises d'une recherche a l'autre - on ne fait
+     * que reecrire leurs champs. Avant : une ArrayList + des dizaines de Move
+     * neufs a CHAQUE noeud, des millions par coup.
+     */
+    private final Move[][] movePool = new Move[MAX_PLY][];
+
+    private int fillMoves(int player) {
+        Move[] pool = movePool[ply];
+        if (pool == null) movePool[ply] = pool = new Move[192];
+        int count = 0;
+        for (int fromRow = 0; fromRow < 13; fromRow++) {
+            for (int fromCol = 0; fromCol < 13; fromCol++) {
+                int piece = grid[fromRow][fromCol];
+                boolean isMyPiece = (isAttacker(player)) ? (piece == RED) : (piece == BLACK || piece == KING);
+                if (!isMyPiece) continue;
+                for (int[] direction : DIRECTIONS) {
+                    int toRow = fromRow + direction[0];
+                    int toCol = fromCol + direction[1];
+                    while (inBounds(toRow, toCol) && grid[toRow][toCol] == EMPTY) {
+                        if (piece == KING || !isHostileSquare(toRow, toCol)) {
+                            if (count == pool.length) {
+                                movePool[ply] = pool = java.util.Arrays.copyOf(pool, pool.length * 2);
+                            }
+                            Move move = pool[count];
+                            if (move == null) {
+                                pool[count] = new Move(fromRow, fromCol, toRow, toCol);
+                            } else {
+                                move.fromRow = fromRow;
+                                move.fromCol = fromCol;
+                                move.toRow = toRow;
+                                move.toCol = toCol;
+                            }
+                            count++;
+                        }
+                        toRow += direction[0];
+                        toCol += direction[1];
+                    }
+                }
+            }
+        }
+        return count;
     }
 
     // Estimation rapide (sans jouer le coup) : ce coup capture-t-il une piece ?
@@ -525,11 +680,19 @@ class Board {
      */
     private int alphaBeta(int depth, int player, int playerToHelp, int alpha, int beta) {
         if (System.currentTimeMillis() > searchDeadline) throw new SearchTimeout();
-        if (isTerminal()) return evaluate(playerToHelp);
+        // Victoire ajustee par la distance : une victoire proche (peu de demi-coups
+        // depuis la racine) vaut PLUS qu'une victoire lointaine. Sans cela, gagner
+        // en 2 coups ou en 8 donne le meme score et l'IA peut tourner en rond au
+        // bord d'une position gagnee sans jamais conclure. Symetriquement, une
+        // defaite lointaine vaut mieux qu'une defaite immediate (on se debat).
+        if (isTerminal()) {
+            int winner = getWinner();
+            return sameTeam(winner, playerToHelp) ? WIN_SCORE - ply : -(WIN_SCORE - ply);
+        }
         // Quiescence desactivee pour l'instant : son cout par feuille (une
         // generation de coups complete) faisait perdre un niveau de profondeur,
         // mesure a l'arene. A reactiver avec un generateur de captures dedie.
-        if (depth == 0) return evaluate(playerToHelp);
+        if (depth <= 0) return evaluate(playerToHelp);
 
         // --- consultation de la table de transposition ---
         // La cle combine la position (hash), le trait et le camp qu'on aide,
@@ -544,7 +707,7 @@ class Board {
         int ttFrom = -1, ttTo = -1;
         long data = ttData[index];
         if ((ttKeys[index] ^ data) == key) {
-            int storedScore = (int) data;
+            int storedScore = fromTT((int) data, ply);
             int storedDepth = (int) ((data >>> 32) & 0xF);
             int storedFlag = (int) ((data >>> 36) & 0x3);
 
@@ -564,20 +727,10 @@ class Board {
         int alphaOriginal = alpha;
         int betaOriginal = beta;
 
-        List<Move> moves = orderMoves(getLegalMoves(player), depth);
-        if (moves.isEmpty()) return evaluate(playerToHelp);
-
-        // le meilleur coup memorise pour cette position est essaye en premier
-        if (ttFrom >= 0) {
-            for (int i = 1; i < moves.size(); i++) {
-                Move candidate = moves.get(i);
-                if (candidate.fromRow * 13 + candidate.fromCol == ttFrom
-                        && candidate.toRow * 13 + candidate.toCol == ttTo) {
-                    moves.add(0, moves.remove(i));
-                    break;
-                }
-            }
-        }
+        int moveCount = fillMoves(player);
+        if (moveCount == 0) return evaluate(playerToHelp);
+        Move[] moves = movePool[ply];   // relu apres fillMoves (le pool peut grandir)
+        orderMoves(moves, moveCount, depth, ttFrom, ttTo);
 
         /*
          * PVS (Principal Variation Search) + LMR (Late Move Reductions), actifs
@@ -592,15 +745,17 @@ class Board {
         int bestScore;
         if (player == playerToHelp) {
             bestScore = Integer.MIN_VALUE;
-            int moveIndex = 0;
-            for (Move move : moves) {
+            for (int moveIndex = 0; moveIndex < moveCount; moveIndex++) {
+                Move move = moves[moveIndex];
                 makeMove(move);
                 int score;
                 try {
                     if (!ttAggressive || moveIndex == 0) {
                         score = alphaBeta(depth - 1, opponent(player), playerToHelp, alpha, beta);
                     } else {
-                        int reduction = (moveIndex >= 6 && depth >= 4) ? 1 : 0;
+                        int reduction = 0;
+                        if (moveIndex >= 6 && depth >= 4) reduction = 1;
+                        if (moveIndex >= 14 && depth >= 6) reduction = 2;
                         score = alphaBeta(depth - 1 - reduction, opponent(player), playerToHelp, alpha, alpha + 1);
                         if (score > alpha) {
                             score = alphaBeta(depth - 1, opponent(player), playerToHelp, alpha, beta);
@@ -618,19 +773,20 @@ class Board {
                     recordCutoff(move, depth);
                     break;
                 }
-                moveIndex++;
             }
         } else {
             bestScore = Integer.MAX_VALUE;
-            int moveIndex = 0;
-            for (Move move : moves) {
+            for (int moveIndex = 0; moveIndex < moveCount; moveIndex++) {
+                Move move = moves[moveIndex];
                 makeMove(move);
                 int score;
                 try {
                     if (!ttAggressive || moveIndex == 0) {
                         score = alphaBeta(depth - 1, opponent(player), playerToHelp, alpha, beta);
                     } else {
-                        int reduction = (moveIndex >= 6 && depth >= 4) ? 1 : 0;
+                        int reduction = 0;
+                        if (moveIndex >= 6 && depth >= 4) reduction = 1;
+                        if (moveIndex >= 14 && depth >= 6) reduction = 2;
                         score = alphaBeta(depth - 1 - reduction, opponent(player), playerToHelp, beta - 1, beta);
                         if (score < beta) {
                             score = alphaBeta(depth - 1, opponent(player), playerToHelp, alpha, beta);
@@ -648,7 +804,6 @@ class Board {
                     recordCutoff(move, depth);
                     break;
                 }
-                moveIndex++;
             }
         }
 
@@ -658,7 +813,7 @@ class Board {
         int flag = (bestScore <= alphaOriginal) ? TT_UPPER
                  : (bestScore >= betaOriginal) ? TT_LOWER
                  : TT_EXACT;
-        long newData = ((long) bestScore) & 0xFFFFFFFFL;
+        long newData = ((long) toTT(bestScore, ply)) & 0xFFFFFFFFL;
         newData |= ((long) Math.min(depth, 15)) << 32;
         newData |= ((long) flag) << 36;
         if (bestMove != null) {
@@ -686,39 +841,60 @@ class Board {
      * demande est l'attaquant rouge. Ainsi, un score positif est toujours bon pour
      * le joueur passe en parametre.
      */
+    /*
+     * Blocus des coins : la strategie gagnante classique de l'attaquant dans
+     * les tafl a sortie par les coins. Trois pions rouges sur la diagonale
+     * d'un coin (ex. C13, B12, A11) scellent ce coin definitivement : le roi
+     * ne peut plus y entrer. Quatre coins scelles = le roi ne peut plus sortir
+     * du tout, et rouge peut resserrer l'etau tranquillement. On recompense
+     * chaque case de garde occupee par un rouge.
+     */
+    /*
+     * CORNER_INDEX[r][c] = numero du coin (0-3) que cette case de garde
+     * protege, ou -1. Trois pions rouges sur la diagonale d'un coin
+     * (ex. C13, B12, A11) scellent ce coin definitivement : le roi ne peut
+     * plus y entrer. Quatre coins scelles = le roi ne peut plus sortir.
+     */
+    private static final int[][] CORNER_INDEX = new int[13][13];
+    static {
+        for (int[] row : CORNER_INDEX) java.util.Arrays.fill(row, -1);
+        int[][] corners = {{0, 0}, {0, 12}, {12, 0}, {12, 12}};
+        for (int c = 0; c < 4; c++) {
+            int rowDir = (corners[c][0] == 0) ? 1 : -1;
+            int colDir = (corners[c][1] == 0) ? 1 : -1;
+            CORNER_INDEX[corners[c][0]][corners[c][1] + 2 * colDir] = c;      // ex. C13
+            CORNER_INDEX[corners[c][0] + rowDir][corners[c][1] + colDir] = c; // ex. B12
+            CORNER_INDEX[corners[c][0] + 2 * rowDir][corners[c][1]] = c;      // ex. A11
+        }
+    }
+
     public int evaluate(int player) {
         int winner = getWinner();
         if (winner != 0) {
             return sameTeam(winner, player) ? WIN_SCORE : -WIN_SCORE;
         }
 
-        int redPieces = 0;
-        int blackPieces = 0;
-        int kingPressure = 0;
+        // Plus aucun balayage de la grille ici : tout vient des compteurs
+        // incrementaux mis a jour par movePiece/removePieceCounters.
+        int redPieces = redCount;
+        int blackPieces = blackCount;
+        // pression : plus un rouge est proche du roi, mieux c'est pour rouge
+        int kingPressure = 24 * redCount - sumDistRedToKing;
 
-        for (int row = 0; row < 13; row++) {
-            for (int col = 0; col < 13; col++) {
-                if (grid[row][col] == RED) {
-                    redPieces++;
-                    // pression : plus un rouge est proche du roi, mieux c'est pour rouge
-                    kingPressure += 24 - (Math.abs(row - kingRow) + Math.abs(col - kingCol));
-                }
-                if (grid[row][col] == BLACK) blackPieces++;
-            }
+        // 25 points par garde de coin en place (bareme plat, valide par arene)
+        int guardScore = 0;
+        for (int corner = 0; corner < 4; corner++) {
+            guardScore += 25 * ((cornerGuardNibbles >>> (4 * corner)) & 0xF);
         }
 
         int material = (blackPieces * 100) - (redPieces * 80);
 
-        // terme de mobilite supprime : il coutait deux balayages complets du
-        // plateau a CHAQUE feuille (la moitie du cout d'evaluation) pour une
-        // influence de quelques points - un niveau de profondeur vaut bien plus
-        int mobility = 0;
-
         // poids asymetrique : le rouge valorise fortement fermer les cotes du roi,
         // le noir garde un roi audacieux qui fonce vers les coins
         int blockerWeight = isDefender(player) ? 30 : 60;
-        int kingSafety = kingEscapeScore(blockerWeight);
-        int defenderScore = material + mobility + kingSafety - (kingPressure * 2);
+        int kingSafety = kingEscapeScore(blockerWeight, isDefender(player));
+
+        int defenderScore = material + kingSafety - (kingPressure * 2) - guardScore;
 
         return isDefender(player) ? defenderScore : -defenderScore;
     }
@@ -736,12 +912,22 @@ class Board {
     private final int[] undoVictimCount = new int[MAX_PLY];
     private final long[] undoHash = new long[MAX_PLY];
     private final int[] undoKing = new int[MAX_PLY];
+    // compteurs incrementaux sauvegardes tels quels : l'annulation est une
+    // simple restauration, aucune arithmetique inverse a maintenir
+    private final int[] undoRedCount = new int[MAX_PLY];
+    private final int[] undoBlackCount = new int[MAX_PLY];
+    private final int[] undoSumDist = new int[MAX_PLY];
+    private final int[] undoGuards = new int[MAX_PLY];
     private int ply = 0;
 
     private void makeMove(Move move) {
         undoHash[ply] = hash;
         undoKing[ply] = kingRow * 13 + kingCol;
         undoVictimCount[ply] = 0;
+        undoRedCount[ply] = redCount;
+        undoBlackCount[ply] = blackCount;
+        undoSumDist[ply] = sumDistRedToKing;
+        undoGuards[ply] = cornerGuardNibbles;
 
         int piece = grid[move.fromRow][move.fromCol];
         movePiece(move, piece);
@@ -760,6 +946,7 @@ class Board {
                 undoVictimCount[ply] = count + 1;
                 grid[victimRow][victimCol] = EMPTY;
                 hash ^= ZOBRIST[victimRow][victimCol][victim];
+                removePieceCounters(victim, victimRow, victimCol);
             }
         }
         ply++;
@@ -776,6 +963,10 @@ class Board {
         kingRow = undoKing[ply] / 13;
         kingCol = undoKing[ply] % 13;
         hash = undoHash[ply];   // restaure tous les XOR d'un coup
+        redCount = undoRedCount[ply];
+        blackCount = undoBlackCount[ply];
+        sumDistRedToKing = undoSumDist[ply];
+        cornerGuardNibbles = undoGuards[ply];
     }
 
     public Board copy() {
@@ -889,7 +1080,7 @@ class Board {
         return isAttacker(player) ? BLACK : RED;
     }
 
-    private int kingEscapeScore(int blockerWeight) {
+    private int kingEscapeScore(int blockerWeight, boolean helpingDefender) {
         // roi colle a un coin libre : victoire noire imparable au prochain coup
         // (personne ne peut occuper le coin, s'interposer ou capturer le roi a temps)
         if (isNextToCorner(kingRow, kingCol)) return 50000;
@@ -903,6 +1094,16 @@ class Board {
         // fourche : deux lignes ouvertes vers des coins, l'attaquant ne peut en bloquer qu'une
         if (openCornerLines >= 2) return 40000;
 
+        /*
+         * Menaces combinees a 1 et 2 coups : trois lanes a couvrir, l'attaquant
+         * n'a pas assez de tempi pour toutes les fermer. ASYMETRIQUE (valide
+         * par l'arene) : le palier n'existe que quand on evalue pour ROUGE -
+         * prophylaxie, fuir ces positions tot. Symetrique, noir thesauriserait
+         * le bonus (garder des menaces vaudrait plus que les executer).
+         */
+        int twoMovePaths = countTwoMoveCornerPaths();
+        if (!helpingDefender && openCornerLines + twoMovePaths >= 3) return 20000;
+
         int closestCorner = Math.min(
                 Math.min(kingRow + kingCol, kingRow + (12 - kingCol)),
                 Math.min((12 - kingRow) + kingCol, (12 - kingRow) + (12 - kingCol))
@@ -911,6 +1112,10 @@ class Board {
         int score = (24 - closestCorner) * 10;
 
         score += openCornerLines * 250;
+        // gradient asymetrique : rouge craint fortement chaque couloir a 2 coups
+        // (le fermer AVANT qu'il devienne une ligne directe) ; noir ne recoit
+        // qu'un leger bonus - sa consigne reste d'EXECUTER l'evasion
+        score += twoMovePaths * (helpingDefender ? 100 : 400);
 
         /*
          * Fermer un cote du roi vaut plus qu'un pion : c'est le chemin vers la
@@ -954,8 +1159,12 @@ class Board {
      * rangees 2/12 etaient des autoroutes invisibles vers les sorties.
      */
     private boolean hasOpenCornerLine(int rowDirection, int colDirection) {
-        int row = kingRow + rowDirection;
-        int col = kingCol + colDirection;
+        return hasOpenCornerLineFrom(kingRow, kingCol, rowDirection, colDirection);
+    }
+
+    private boolean hasOpenCornerLineFrom(int fromRow, int fromCol, int rowDirection, int colDirection) {
+        int row = fromRow + rowDirection;
+        int col = fromCol + colDirection;
 
         while (inBounds(row, col)) {
             if (isCorner(row, col)) return true;
@@ -966,6 +1175,35 @@ class Board {
         }
 
         return false;
+    }
+
+    /*
+     * Menaces a DEUX coups ("tour du roi") : le roi glisse le long d'un rayon
+     * jusqu'a une case d'arret S, d'ou une ligne PERPENDICULAIRE degagee mene
+     * a un coin ou a une case vide voisine d'un coin. C'est exactement le
+     * schema qui nous a battus deux fois (K11-K1 puis K3-M3/B3 puis le coin) :
+     * invisible pour hasOpenCornerLine tant que le roi n'est pas DEJA sur S.
+     * Au plus un chemin compte par rayon : boucher le rayon pres du roi coupe
+     * d'un coup toutes les cases S de ce rayon.
+     */
+    private int countTwoMoveCornerPaths() {
+        int paths = 0;
+        for (int[] direction : DIRECTIONS) {
+            int row = kingRow + direction[0];
+            int col = kingCol + direction[1];
+            boolean found = false;
+            while (!found && inBounds(row, col) && grid[row][col] == EMPTY) {
+                if (direction[0] == 0) {
+                    found = hasOpenCornerLineFrom(row, col, -1, 0) || hasOpenCornerLineFrom(row, col, 1, 0);
+                } else {
+                    found = hasOpenCornerLineFrom(row, col, 0, -1) || hasOpenCornerLineFrom(row, col, 0, 1);
+                }
+                row += direction[0];
+                col += direction[1];
+            }
+            if (found) paths++;
+        }
+        return paths;
     }
 
     private boolean isNextToCorner(int row, int col) {
