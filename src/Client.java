@@ -23,7 +23,7 @@ class Client {
         int myPlayer = Board.RED;
         Move lastSentMove = null;
         List<String> rejectedMoves = new ArrayList<>();
-        Map<String, Integer> positionHistory = new HashMap<>();
+        Map<Long, Integer> positionHistory = new HashMap<>();
         List<String> movesLog = new ArrayList<>();
 
         try {
@@ -42,7 +42,7 @@ class Client {
                     movesLog.clear();
                     System.out.println("Nouvelle partie comme joueur rouge.");
 
-                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory, movesLog);
+                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory);
                     boardBeforeLastMove = board.copy();
                     lastSentMove = move;
                     rejectedMoves.clear();
@@ -86,7 +86,7 @@ class Client {
                         }
                     }
 
-                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory, movesLog);
+                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory);
                     boardBeforeLastMove = board.copy();
                     lastSentMove = move;
                     rejectedMoves.clear();
@@ -116,7 +116,7 @@ class Client {
                         }
                     }
 
-                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory, movesLog);
+                    Move move = chooseMove(board, myPlayer, rejectedMoves, positionHistory);
                     boardBeforeLastMove = board.copy();
                     lastSentMove = move;
                     sendMove(output, move);
@@ -267,56 +267,24 @@ class Client {
         }
     }
 
-    private static void recordPosition(Board board, Map<String, Integer> positionHistory) {
-        positionHistory.merge(board.positionKey(), 1, Integer::sum);
-    }
-
-    /*
-     * Livre d'ouverture rouge : pour la ligne EXACTE de l'adversaire connu,
-     * joue d'office la branche validee par la serie du 3 aout (prefixe
-     * G12-B12 : 2 victoires + 1 nul, 0 defaite ; les branches M5-J5/M6-J6
-     * au meme carrefour : 3 defaites eclair par tour du roi). Cle = suite
-     * complete des coups joues ; a la moindre deviation adverse, aucune
-     * entree ne correspond et la recherche normale reprend.
-     */
-    private static final String[][] OPENING_BOOK = {
-        {"", "E13-C13"},
-        {"E13-C13 G8-C8", "M8-G8"},
-        {"E13-C13 G8-C8 M8-G8 F7-F8", "G8-K8"},
-        {"E13-C13 G8-C8 M8-G8 F7-F8 G8-K8 G9-K9", "I13-K13"},
-        {"E13-C13 G8-C8 M8-G8 F7-F8 G8-K8 G9-K9 I13-K13 J7-K7", "G12-B12"},
-        {"E13-C13 G8-C8 M8-G8 F7-F8 G8-K8 G9-K9 I13-K13 J7-K7 G12-B12 G7-G9", "H13-H9"},
-        {"E13-C13 G8-C8 M8-G8 F7-F8 G8-K8 G9-K9 I13-K13 J7-K7 G12-B12 G7-G9 H13-H9 G9-D9", "L7-L12"},
-    };
-
-    private static Move bookMove(Board board, int player, List<String> rejectedMoves, List<String> movesLog) {
-        if (player != Board.RED) return null;
-        StringBuilder history = new StringBuilder();
-        for (String entry : movesLog) {
-            // entrees du journal au format "ROUGE E13-C13" : ne garder que le coup
-            if (history.length() > 0) history.append(' ');
-            history.append(entry.substring(entry.lastIndexOf(' ') + 1));
-        }
-        String key = history.toString();
-        for (String[] line : OPENING_BOOK) {
-            if (line[0].equals(key)) {
-                Move move = Move.tryParse(line[1]);
-                if (move != null && board.isValidMove(move) && !rejectedMoves.contains(line[1])) {
-                    System.out.println("(livre d'ouverture : " + line[1] + ")");
-                    return move;
-                }
-            }
-        }
-        return null;
+    private static void recordPosition(Board board, Map<Long, Integer> positionHistory) {
+        positionHistory.merge(board.positionHash(), 1, Integer::sum);
     }
 
     private static Move chooseMove(Board board, int player, List<String> rejectedMoves,
-                                   Map<String, Integer> positionHistory, List<String> movesLog) {
-        Move bookChoice = bookMove(board, player, rejectedMoves, movesLog);
-        if (bookChoice != null) return bookChoice;
+                                   Map<Long, Integer> positionHistory) {
+        // le moteur repond d'abord depuis son livre d'ouverture, sinon il cherche
+        Move bookChoice = board.bookMove(player);
+        if (bookChoice != null && !rejectedMoves.contains(bookChoice.toString())) {
+            System.out.println("(livre d'ouverture)");
+            return bookChoice;
+        }
 
         Move bestMove = board.getBestMoveTimed(player, TIME_BUDGET_MS, positionHistory);
-        System.out.println("(profondeur atteinte : " + Board.lastSearchDepth + ")");
+        // score du point de vue de notre camp : une chute brutale signale que la
+        // position se degrade bien avant que la defaite soit visible sur le plateau
+        System.out.printf("(profondeur %d, score %+d, %d ms)%n",
+                Board.lastSearchDepth(), Board.lastSearchScore(), Board.lastSearchMillis());
         if (bestMove != null && !rejectedMoves.contains(bestMove.toString())) {
             return bestMove;
         }

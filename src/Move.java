@@ -31,14 +31,14 @@ public class Move {
 
     static int[] parseSquare(String sq){
         int col = sq.charAt(0) - 'A';
-        int row = 13 - Integer.parseInt(sq.substring(1));
+        int row = Board.SIZE - Integer.parseInt(sq.substring(1));
 
         return new int[]{row, col};
     }
 
     static String toSquare(int row, int col){
         char letterCol = (char)('A' + col);
-        int numberRow = 13 - row;
+        int numberRow = Board.SIZE - row;
 
         return "" + letterCol + numberRow;
     }

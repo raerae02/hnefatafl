@@ -7,9 +7,15 @@ import java.util.Random;
 class Board {
     private static final int[][] DIRECTIONS = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
     private int kingRow, kingCol;
+    static final int SIZE = 13;                  // plateau 13x13
+    private static final int SQUARES = SIZE * SIZE;      // 169 cases
+    private static final int LAST = SIZE - 1;            // derniere ligne/colonne
+    private static final int CENTER = SIZE / 2;          // case du trone
+    private static final int MAX_DISTANCE = 2 * LAST;    // distance de Manhattan maximale
+    private static final int MAX_SEARCH_DEPTH = 12;      // borne de l approfondissement iteratif
     private static final int WIN_SCORE = 100000;
     static final int EMPTY = 0, BLACK = 2, RED = 4, KING = 5;
-    int[][] grid;
+    private int[][] grid;
 
     /*
      * Hachage de Zobrist : identifiant 64 bits de la position, mis a jour
@@ -18,13 +24,13 @@ class Board {
      * Chaque combinaison (case, piece) recoit un nombre aleatoire fixe ;
      * le hash de la position est le XOR de ceux de ses pieces.
      */
-    private static final long[][][] ZOBRIST = new long[13][13][6];
+    private static final long[][][] ZOBRIST = new long[SIZE][SIZE][6];
     private static final long ZOBRIST_RED_TURN;
     private static final long ZOBRIST_HELP_RED;
     static {
         Random random = new Random(987654321L);   // graine fixe : reproductible
-        for (int row = 0; row < 13; row++) {
-            for (int col = 0; col < 13; col++) {
+        for (int row = 0; row < SIZE; row++) {
+            for (int col = 0; col < SIZE; col++) {
                 for (int piece = 0; piece < 6; piece++) {
                     ZOBRIST[row][col][piece] = random.nextLong();
                 }
@@ -37,8 +43,8 @@ class Board {
 
     public Board(int[][] grid){
         this.grid = grid;
-        for (int row = 0; row < 13; row++) {
-            for (int col = 0; col < 13; col++) {
+        for (int row = 0; row < SIZE; row++) {
+            for (int col = 0; col < SIZE; col++) {
                 if(grid[row][col] == KING){
                     kingRow = row;
                     kingCol = col;
@@ -77,8 +83,8 @@ class Board {
         blackCount = 0;
         sumDistRedToKing = 0;
         cornerGuardNibbles = 0;
-        for (int row = 0; row < 13; row++) {
-            for (int col = 0; col < 13; col++) {
+        for (int row = 0; row < SIZE; row++) {
+            for (int col = 0; col < SIZE; col++) {
                 if (grid[row][col] == RED) {
                     redCount++;
                     sumDistRedToKing += Math.abs(row - kingRow) + Math.abs(col - kingCol);
@@ -94,8 +100,8 @@ class Board {
     // Cout paye seulement aux coups du roi, plus a chaque feuille.
     private void recomputeRedDistances() {
         sumDistRedToKing = 0;
-        for (int row = 0; row < 13; row++) {
-            for (int col = 0; col < 13; col++) {
+        for (int row = 0; row < SIZE; row++) {
+            for (int col = 0; col < SIZE; col++) {
                 if (grid[row][col] == RED) {
                     sumDistRedToKing += Math.abs(row - kingRow) + Math.abs(col - kingCol);
                 }
@@ -181,8 +187,8 @@ class Board {
      */
     private int scanMoves(int player, List<Move> collector) {
         int count = 0;
-        for (int fromRow = 0; fromRow < 13; fromRow++) {
-            for (int fromCol = 0; fromCol < 13; fromCol++) {
+        for (int fromRow = 0; fromRow < SIZE; fromRow++) {
+            for (int fromCol = 0; fromCol < SIZE; fromCol++) {
                 int piece = grid[fromRow][fromCol];
                 boolean isMyPiece = (isAttacker(player)) ? (piece == RED) : (piece == BLACK || piece == KING);
                 if(!isMyPiece) continue;
@@ -206,7 +212,19 @@ class Board {
 
     // volatile : lus par les threads assistants, ecrits par le thread principal
     private static volatile long searchDeadline = Long.MAX_VALUE;
-    public static int lastSearchDepth = 0;
+
+    /*
+     * Compte rendu de la derniere recherche (profondeur completee, score du
+     * meilleur coup, duree). En lecture seule de l'exterieur : c'est le
+     * resultat d'une recherche, pas un reglage.
+     */
+    private static volatile int lastDepth = 0;
+    private static volatile int lastScore = 0;
+    private static volatile long lastElapsedMs = 0;
+
+    public static int lastSearchDepth() { return lastDepth; }
+    public static int lastSearchScore() { return lastScore; }
+    public static long lastSearchMillis() { return lastElapsedMs; }
 
     /*
      * Table de transposition (memoisation) : la meme position est souvent
@@ -260,10 +278,10 @@ class Board {
     private static final int MAX_DEPTH = 32;
     private static final int[] killer1 = new int[MAX_DEPTH];
     private static final int[] killer2 = new int[MAX_DEPTH];
-    private static final int[][] historyTable = new int[169][169];
+    private static final int[][] historyTable = new int[SQUARES][SQUARES];
 
     private static int packMove(Move move) {
-        return (move.fromRow * 13 + move.fromCol) * 169 + (move.toRow * 13 + move.toCol);
+        return (move.fromRow * SIZE + move.fromCol) * SQUARES + (move.toRow * SIZE + move.toCol);
     }
 
     private static void recordCutoff(Move move, int depth) {
@@ -272,7 +290,7 @@ class Board {
             killer2[depth] = killer1[depth];
             killer1[depth] = packed;
         }
-        historyTable[move.fromRow * 13 + move.fromCol][move.toRow * 13 + move.toCol] += depth * depth;
+        historyTable[move.fromRow * SIZE + move.fromCol][move.toRow * SIZE + move.toCol] += depth * depth;
     }
 
     /*
@@ -291,7 +309,7 @@ class Board {
     private int previousBestScore;
     private boolean hasPreviousScore;
 
-    public Move getBestMoveTimed(int player, long timeBudgetMs, Map<String, Integer> positionHistory) {
+    public Move getBestMoveTimed(int player, long timeBudgetMs, Map<Long, Integer> positionHistory) {
         long deadline = System.currentTimeMillis() + timeBudgetMs;
         hasPreviousScore = false;
 
@@ -307,11 +325,11 @@ class Board {
 
         Map<String, Integer> previousScores = new HashMap<>();
         Move bestMove = null;
-        lastSearchDepth = 0;
+        lastDepth = 0;
         List<Thread> helpers = new ArrayList<>();
 
         try {
-            for (int depth = 2; depth <= 12; depth++) {
+            for (int depth = 2; depth <= MAX_SEARCH_DEPTH; depth++) {
                 searchDeadline = (depth == 2) ? Long.MAX_VALUE : deadline;
                 ttAggressive = true;
 
@@ -353,7 +371,8 @@ class Board {
                 hasPreviousScore = true;
 
                 bestMove = iterationBest;
-                lastSearchDepth = depth;
+                lastDepth = depth;
+                lastScore = lastRootScore;
                 previousScores = scores;
             }
         } catch (SearchTimeout e) {
@@ -371,6 +390,7 @@ class Board {
             searchDeadline = Long.MAX_VALUE;
         }
 
+        lastElapsedMs = System.currentTimeMillis() - (deadline - timeBudgetMs);
         return bestMove;
     }
 
@@ -378,7 +398,7 @@ class Board {
     // penalite d'anti-repetition. Remplit scoresOut pour le tri de l'iteration
     // suivante et retourne le meilleur coup de cette profondeur.
     private Move searchRoot(List<Move> moves, int player, int depth,
-                            Map<String, Integer> positionHistory, Map<String, Integer> scoresOut,
+                            Map<Long, Integer> positionHistory, Map<String, Integer> scoresOut,
                             int alphaInit, int betaInit) {
         Move best = null;
         int bestScore = Integer.MIN_VALUE;
@@ -387,7 +407,7 @@ class Board {
         for (Move move : moves) {
             makeMove(move);
             int score;
-            String childKey;
+            long childKey = 0;
             try {
                 /*
                  * PVS a la racine : le premier coup (le mieux classe par
@@ -405,7 +425,7 @@ class Board {
                                 alpha, betaInit);
                     }
                 }
-                childKey = (positionHistory != null) ? positionKey() : null;
+                childKey = hash;   // identite de la position apres le coup
             } finally {
                 unmakeMove(move);
             }
@@ -455,7 +475,7 @@ class Board {
             try {
                 ttAggressive = true;
                 searchDeadline = Long.MAX_VALUE;
-                for (int depth = 2; depth <= 12; depth++) {
+                for (int depth = 2; depth <= MAX_SEARCH_DEPTH; depth++) {
                     local.searchRoot(local.getLegalMoves(playerToMove), playerToMove, depth, null, null,
                             Integer.MIN_VALUE, Integer.MAX_VALUE);
                 }
@@ -488,7 +508,7 @@ class Board {
             Board localBoard = copy();
             Thread helper = new Thread(() -> {
                 try {
-                    for (int depth = startDepth; depth <= 12; depth++) {
+                    for (int depth = startDepth; depth <= MAX_SEARCH_DEPTH; depth++) {
                         localBoard.searchRoot(localBoard.getLegalMoves(player), player, depth, null, null,
                                 Integer.MIN_VALUE, Integer.MAX_VALUE);
                     }
@@ -518,12 +538,12 @@ class Board {
     private void orderMoves(Move[] buffer, int count, int depth, int ttFrom, int ttTo) {
         for (int i = 0; i < count; i++) {
             Move move = buffer[i];
-            int from = move.fromRow * 13 + move.fromCol;
-            int to = move.toRow * 13 + move.toCol;
+            int from = move.fromRow * SIZE + move.fromCol;
+            int to = move.toRow * SIZE + move.toCol;
             if (from == ttFrom && to == ttTo) move.sortScore = Integer.MAX_VALUE;
             else if (isCapturingMove(move)) move.sortScore = SCORE_CAPTURE;
             else {
-                int packed = from * 169 + to;
+                int packed = from * SQUARES + to;
                 if (packed == killer1[depth] || packed == killer2[depth]) move.sortScore = SCORE_KILLER;
                 else if (grid[move.fromRow][move.fromCol] == KING) move.sortScore = SCORE_KING;
                 else move.sortScore = Math.min(historyTable[from][to], SCORE_QUIET_CAP);
@@ -555,8 +575,8 @@ class Board {
         Move[] pool = movePool[ply];
         if (pool == null) movePool[ply] = pool = new Move[192];
         int count = 0;
-        for (int fromRow = 0; fromRow < 13; fromRow++) {
-            for (int fromCol = 0; fromCol < 13; fromCol++) {
+        for (int fromRow = 0; fromRow < SIZE; fromRow++) {
+            for (int fromCol = 0; fromCol < SIZE; fromCol++) {
                 int piece = grid[fromRow][fromCol];
                 boolean isMyPiece = (isAttacker(player)) ? (piece == RED) : (piece == BLACK || piece == KING);
                 if (!isMyPiece) continue;
@@ -605,70 +625,15 @@ class Board {
         return false;
     }
 
-    // Signature compacte de la position, utilisee pour detecter les repetitions.
-    public String positionKey() {
-        StringBuilder key = new StringBuilder(169);
-        for (int row = 0; row < 13; row++) {
-            for (int col = 0; col < 13; col++) {
-                key.append((char) ('0' + grid[row][col]));
-            }
-        }
-        return key.toString();
+    // Identite de la position (hachage de Zobrist) : sert de cle a la table de
+    // transposition ET a l'historique des repetitions cote Client.
+    public long positionHash() {
+        return hash;
     }
 
     /*
-     * Minimax explore les coups possibles jusqu'a une certaine profondeur.
-     * - player represente le joueur dont c'est le tour dans ce niveau de recherche.
-     * - playerToHelp represente le joueur pour lequel on cherche le meilleur coup.
-     *
-     * La methode simule chaque coup sur une copie du plateau, puis appelle recursivement
-     * minimax pour le joueur adverse. Quand la profondeur arrive a 0, ou quand la partie
-     * est terminee, evaluate(playerToHelp) donne une note au plateau.
-     *
-     * Si c'est le tour de playerToHelp, on garde le score le plus grand, car ce joueur
-     * cherche a ameliorer sa position. Sinon, on garde le score le plus petit, car on
-     * suppose que l'adversaire joue aussi le meilleur coup possible contre lui.
-     */
-    public int minimax(int depth, int player, int playerToHelp) {
-        if (depth == 0 || isTerminal()) return evaluate(playerToHelp);
-
-        List<Move> moves = getLegalMoves(player);
-        if (moves.isEmpty()) return evaluate(playerToHelp);
-
-        boolean isGoodPlayerTurn = player == playerToHelp;
-        int bestScore;
-        if (isGoodPlayerTurn) {
-            bestScore = Integer.MIN_VALUE;
-        } else {
-            bestScore = Integer.MAX_VALUE;
-        }
-
-        for (Move move : moves) {
-            Board nextBoard = copy();
-            nextBoard.applyMove(move);
-            int score = nextBoard.minimax(depth - 1, opponent(player), playerToHelp);
-
-            if (isGoodPlayerTurn) {
-                bestScore = Math.max(bestScore, score);
-            } else {
-                bestScore = Math.min(bestScore, score);
-            }
-        }
-
-        return bestScore;
-    }
-
-    /*
-     * Version publique de minimax avec elagage alpha-beta.
-     * Elle lance alphaBeta avec les bornes les plus larges possibles.
-     */
-    public int minimaxAlphaBeta(int depth, int player, int playerToHelp) {
-        return alphaBeta(depth, player, playerToHelp, Integer.MIN_VALUE, Integer.MAX_VALUE);
-    }
-
-    /*
-     * Alpha-beta fait le meme travail que minimax, mais evite d'explorer des branches
-     * qui ne peuvent plus changer le resultat final.
+     * Alpha-beta fait le meme travail qu'un minimax, mais evite d'explorer des
+     * branches qui ne peuvent plus changer le resultat final.
      *
      * alpha est le meilleur score deja trouve pour le joueur qui maximise.
      * beta est le meilleur score deja trouve pour le joueur qui minimise.
@@ -817,8 +782,8 @@ class Board {
         newData |= ((long) Math.min(depth, 15)) << 32;
         newData |= ((long) flag) << 36;
         if (bestMove != null) {
-            newData |= ((long) (bestMove.fromRow * 13 + bestMove.fromCol)) << 38;
-            newData |= ((long) (bestMove.toRow * 13 + bestMove.toCol)) << 46;
+            newData |= ((long) (bestMove.fromRow * SIZE + bestMove.fromCol)) << 38;
+            newData |= ((long) (bestMove.toRow * SIZE + bestMove.toCol)) << 46;
         }
         ttKeys[index] = key ^ newData;
         ttData[index] = newData;
@@ -855,10 +820,10 @@ class Board {
      * (ex. C13, B12, A11) scellent ce coin definitivement : le roi ne peut
      * plus y entrer. Quatre coins scelles = le roi ne peut plus sortir.
      */
-    private static final int[][] CORNER_INDEX = new int[13][13];
+    private static final int[][] CORNER_INDEX = new int[SIZE][SIZE];
     static {
         for (int[] row : CORNER_INDEX) java.util.Arrays.fill(row, -1);
-        int[][] corners = {{0, 0}, {0, 12}, {12, 0}, {12, 12}};
+        int[][] corners = {{0, 0}, {0, LAST}, {LAST, 0}, {LAST, LAST}};
         for (int c = 0; c < 4; c++) {
             int rowDir = (corners[c][0] == 0) ? 1 : -1;
             int colDir = (corners[c][1] == 0) ? 1 : -1;
@@ -868,7 +833,7 @@ class Board {
         }
     }
 
-    public int evaluate(int player) {
+    private int evaluate(int player) {
         int winner = getWinner();
         if (winner != 0) {
             return sameTeam(winner, player) ? WIN_SCORE : -WIN_SCORE;
@@ -879,7 +844,7 @@ class Board {
         int redPieces = redCount;
         int blackPieces = blackCount;
         // pression : plus un rouge est proche du roi, mieux c'est pour rouge
-        int kingPressure = 24 * redCount - sumDistRedToKing;
+        int kingPressure = MAX_DISTANCE * redCount - sumDistRedToKing;
 
         // 25 points par garde de coin en place (bareme plat, valide par arene)
         int guardScore = 0;
@@ -922,7 +887,7 @@ class Board {
 
     private void makeMove(Move move) {
         undoHash[ply] = hash;
-        undoKing[ply] = kingRow * 13 + kingCol;
+        undoKing[ply] = kingRow * SIZE + kingCol;
         undoVictimCount[ply] = 0;
         undoRedCount[ply] = redCount;
         undoBlackCount[ply] = blackCount;
@@ -941,7 +906,7 @@ class Board {
             if (victim != EMPTY && !sameTeam(victim, piece) && victim != KING
                     && shouldCapture(move.toRow + 2 * direction[0], move.toCol + 2 * direction[1], piece)) {
                 int count = undoVictimCount[ply];
-                undoVictimSquare[ply][count] = victimRow * 13 + victimCol;
+                undoVictimSquare[ply][count] = victimRow * SIZE + victimCol;
                 undoVictimPiece[ply][count] = victim;
                 undoVictimCount[ply] = count + 1;
                 grid[victimRow][victimCol] = EMPTY;
@@ -956,12 +921,12 @@ class Board {
         ply--;
         for (int i = 0; i < undoVictimCount[ply]; i++) {
             int square = undoVictimSquare[ply][i];
-            grid[square / 13][square % 13] = undoVictimPiece[ply][i];
+            grid[square / SIZE][square % SIZE] = undoVictimPiece[ply][i];
         }
         grid[move.fromRow][move.fromCol] = grid[move.toRow][move.toCol];
         grid[move.toRow][move.toCol] = EMPTY;
-        kingRow = undoKing[ply] / 13;
-        kingCol = undoKing[ply] % 13;
+        kingRow = undoKing[ply] / SIZE;
+        kingCol = undoKing[ply] % SIZE;
         hash = undoHash[ply];   // restaure tous les XOR d'un coup
         redCount = undoRedCount[ply];
         blackCount = undoBlackCount[ply];
@@ -970,16 +935,16 @@ class Board {
     }
 
     public Board copy() {
-        int[][] copiedGrid = new int[13][13];
-        for (int row = 0; row < 13; row++) {
-            System.arraycopy(grid[row], 0, copiedGrid[row], 0, 13);
+        int[][] copiedGrid = new int[SIZE][SIZE];
+        for (int row = 0; row < SIZE; row++) {
+            System.arraycopy(grid[row], 0, copiedGrid[row], 0, SIZE);
         }
         return new Board(copiedGrid, kingRow, kingCol, hash);
     }
 
-    public boolean isTerminal() { return getWinner() != 0; }
+    private boolean isTerminal() { return getWinner() != 0; }
 
-    public int getWinner() {
+    private int getWinner() {
         // noir gagne si le roi arrive dans un coin
         if (isCorner(kingRow, kingCol)) return BLACK;
 
@@ -994,9 +959,9 @@ class Board {
 
     public void print() {
         char[] symbols = {'.', '?', 'N', '?', 'R', 'K'};
-        for (int row = 0; row < 13; row++) {
-            System.out.printf("%2d  ", 13 - row);
-            for (int col = 0; col < 13; col++) {
+        for (int row = 0; row < SIZE; row++) {
+            System.out.printf("%2d  ", SIZE - row);
+            for (int col = 0; col < SIZE; col++) {
                 System.out.print(symbols[grid[row][col]] + " ");
             }
             System.out.println();
@@ -1005,7 +970,7 @@ class Board {
     }
 
     // Verifie la validite d'un coup (exigence de l'enonce pour les coups adverses).
-    boolean isValidMove(Move move){
+    public boolean isValidMove(Move move){
         int piece = grid[move.fromRow][move.fromCol];
 
         if(piece == EMPTY) return false;
@@ -1028,11 +993,11 @@ class Board {
     }
 
     private boolean isCorner(int row, int col) {
-        return (row == 0 || row == 12) && (col == 0 || col == 12);
+        return (row == 0 || row == LAST) && (col == 0 || col == LAST);
     }
 
     private boolean isThrone(int row, int col){
-        return row == 6 && col == 6;
+        return row == CENTER && col == CENTER;
     }
 
     private boolean isPathClear(Move move){
@@ -1060,13 +1025,13 @@ class Board {
     }
 
     private boolean isHostileSquare(int row, int col) {
-        boolean corner = (row == 0 || row == 12) && (col == 0 || col == 12);
-        boolean throne = (row == 6 && col == 6);
+        boolean corner = (row == 0 || row == LAST) && (col == 0 || col == LAST);
+        boolean throne = (row == CENTER && col == CENTER);
         return corner || throne;
     }
 
     private boolean inBounds(int row, int col) {
-        return row >= 0 && row < 13 && col >= 0 && col < 13;
+        return row >= 0 && row < SIZE && col >= 0 && col < SIZE;
     }
 
     private boolean isBlockedForKing(int row, int col) {
@@ -1105,11 +1070,11 @@ class Board {
         if (!helpingDefender && openCornerLines + twoMovePaths >= 3) return 20000;
 
         int closestCorner = Math.min(
-                Math.min(kingRow + kingCol, kingRow + (12 - kingCol)),
-                Math.min((12 - kingRow) + kingCol, (12 - kingRow) + (12 - kingCol))
+                Math.min(kingRow + kingCol, kingRow + (LAST - kingCol)),
+                Math.min((LAST - kingRow) + kingCol, (LAST - kingRow) + (LAST - kingCol))
         );
 
-        int score = (24 - closestCorner) * 10;
+        int score = (MAX_DISTANCE - closestCorner) * 10;
 
         score += openCornerLines * 250;
         // gradient asymetrique : rouge craint fortement chaque couloir a 2 coups
@@ -1209,5 +1174,67 @@ class Board {
     private boolean isNextToCorner(int row, int col) {
         return isCorner(row - 1, col) || isCorner(row + 1, col)
                 || isCorner(row, col - 1) || isCorner(row, col + 1);
+    }
+
+    /*
+     * ------------------------- LIVRE D'OUVERTURE -------------------------
+     * Suite de coups validee en serie contre l'adversaire connu : au 5e coup
+     * rouge, la branche G12-B12 (couverture des couloirs du haut) n'a jamais
+     * perdu, alors que pousser vers le centre (M5-J5 / M6-J6) a perdu trois
+     * fois par tour du roi. Le livre supprime ce tirage au sort.
+     *
+     * Indexation par HACHAGE DE POSITION (et non par suite de coups) : la
+     * meme position atteinte dans un ordre different est reconnue, et le
+     * livre n'a besoin d'aucun historique - juste de la position courante.
+     * Les hachages sont calcules au premier appel en rejouant LINE depuis la
+     * position initiale : la source reste lisible, la cle reste robuste.
+     */
+    private static final String[] BOOK_LINE = {
+        "E13-C13", "G8-C8", "M8-G8", "F7-F8", "G8-K8", "G9-K9", "I13-K13",
+        "J7-K7", "G12-B12", "G7-G9", "H13-H9", "G9-D9", "L7-L12"
+    };
+
+    private static final String[] INITIAL_ROWS = {
+        "....RRRRR....", "......R......", ".............", "......N......",
+        "R.....N.....R", "R.....N.....R", "RR.NNNKNNN.RR", "R.....N.....R",
+        "R.....N.....R", "......N......", ".............", "......R......",
+        "....RRRRR...."
+    };
+
+    private static Map<Long, Integer> book;   // cle = hash ^ trait, valeur = coup compacte
+
+    private static Map<Long, Integer> book() {
+        if (book != null) return book;
+        Map<Long, Integer> built = new HashMap<>();
+        int[][] grid = new int[SIZE][SIZE];
+        for (int row = 0; row < SIZE; row++) {
+            for (int col = 0; col < SIZE; col++) {
+                char symbol = INITIAL_ROWS[row].charAt(col);
+                if (symbol == 'R') grid[row][col] = RED;
+                if (symbol == 'N') grid[row][col] = BLACK;
+                if (symbol == 'K') grid[row][col] = KING;
+            }
+        }
+        Board replay = new Board(grid);
+        int player = RED;
+        for (String text : BOOK_LINE) {
+            Move move = Move.tryParse(text);
+            if (move == null || !replay.isValidMove(move)) break;   // ligne incoherente : on s'arrete
+            if (player == RED) built.put(replay.hash ^ ZOBRIST_RED_TURN, packMove(move));
+            replay.applyMove(move);
+            player = (player == RED) ? BLACK : RED;
+        }
+        book = built;
+        return book;
+    }
+
+    /* Coup du livre pour cette position, ou null s'il faut chercher. */
+    public Move bookMove(int player) {
+        if (player != RED) return null;
+        Integer packed = book().get(hash ^ ZOBRIST_RED_TURN);
+        if (packed == null) return null;
+        int from = packed / SQUARES, to = packed % SQUARES;
+        Move move = new Move(from / SIZE, from % SIZE, to / SIZE, to % SIZE);
+        return isValidMove(move) ? move : null;
     }
 }
